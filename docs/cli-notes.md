@@ -14,6 +14,8 @@ a dry run and a real upload.
 | `filesystem info <path>` exits non-zero for a missing path | Verified |
 | `filesystem create-folder <parentPath> <name>` (two arguments) | Verified |
 | `filesystem upload -f <strategy> -d <strategy> <local...> <parent>` creates the file; values are `merge`, `keep-both`, `replace`, `skip` | Verified (0.6.0). `create-new-revision` is not available in 0.6.0 |
+| `replace` on a changed file overwrites it in place: new content, no duplicate, nothing added to `/trash` (checked 2026-11-01) | Verified (0.6.0) |
+| The session survives restarting the app process | Verified (two restarts); a full container recreate is not yet tested |
 | Strategy flags are mandatory, otherwise the CLI prompts | Documented in `--help`; we always pass them |
 
 ## Measured
@@ -23,9 +25,9 @@ a dry run and a real upload.
 
 ## Still to test
 
-1. Restart the container and confirm the session survives.
+1. Recreate the container (not just the process) and confirm the session survives in the mounted volume.
 2. Kill the process mid-run, restart, and confirm the next run resumes (the index only records batches that finished).
-3. Change a file and confirm only that file uploads, and check what `replace` does to the old remote copy (trash vs revision).
+3. ~~Change a file and confirm only that file uploads~~ — done: one file uploaded in 11 s.
 4. Compare speed against rclone on the Immich set, and check whether the CLI can see the files rclone already uploaded.
 5. Session lifetime: leave it for several days and check that jobs still authenticate.
 6. Newer CLI builds (0.8.0+) rename strategies; re-check `--help` before upgrading.
