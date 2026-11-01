@@ -318,3 +318,30 @@ def test_parallel_run_indexes_every_file_exactly_once(env, monkeypatch):
     idx = db.indexed(jid)
     assert len(idx) == 8 and {"top.txt", "a/one.txt", "q0.txt", "q5.txt"} <= set(idx)
     assert runner.run_job(jid) == "ok" and len(uploads(log)) == 8  # second run uploads nothing
+
+
+# ---- "database is locked" from overlapping CLI processes ----
+
+def test_sqlite_busy_on_create_folder_and_upload_is_retried(env, monkeypatch, tmp_path, caplog):
+    import logging
+    caplog.set_level(logging.WARNING)
+    db, cli, runner, src, log = env
+    monkeypatch.setattr("app.cli.time.sleep", lambda s: None)
+    monkeypatch.setenv("FAKE_BUSY_FILE", str(tmp_path / "busy"))
+    monkeypatch.setenv("FAKE_BUSY_N", "3")  # first 3 create-folder/upload calls hit the lock
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *", ["skip/**", "a/**"])
+    assert runner.run_job(jid) == "ok"
+    assert "cli_busy" in caplog.text and db.indexed(jid) == {"top.txt": db.indexed(jid)["top.txt"]}
+    assert db.run_errors(db.last_run(jid)["id"]) == []
+
+
+def test_persistent_busy_gives_up_with_a_clear_error(env, monkeypatch, tmp_path):
+    db, cli, runner, src, log = env
+    monkeypatch.setattr("app.cli.time.sleep", lambda s: None)
+    monkeypatch.setenv("FAKE_BUSY_FILE", str(tmp_path / "busy"))
+    monkeypatch.setenv("FAKE_BUSY_N", "999")
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *", ["skip/**", "a/**"])
+    assert runner.run_job(jid) == "failed"
+    errs = db.run_errors(db.last_run(jid)["id"])
+    assert errs and "database is locked" in errs[0]["message"]
+    assert db.indexed(jid) == {}

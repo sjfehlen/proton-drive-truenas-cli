@@ -13,6 +13,13 @@ if flaky and args[:2] == ["filesystem", "list"] and not os.path.exists(flaky):
     open(flaky, "w").close()
     print("lock busy")
     sys.exit(1)
+busy_file = os.environ.get("FAKE_BUSY_FILE")
+if busy_file and args[:2] in (["filesystem", "create-folder"], ["filesystem", "upload"]):
+    n = int(open(busy_file).read() or 0) if os.path.exists(busy_file) else 0
+    if n < int(os.environ.get("FAKE_BUSY_N", "1")):
+        open(busy_file, "w").write(str(n + 1))
+        print("SQLiteError: database is locked\n errno: 5,\n code: \"SQLITE_BUSY\"")
+        sys.exit(1)
 if os.environ.get("FAKE_DEAD") == "1":
     print("You need to login first")
     sys.exit(1)

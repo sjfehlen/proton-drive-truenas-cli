@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import re
 import subprocess
 import tempfile
@@ -16,6 +17,17 @@ from dataclasses import dataclass
 
 URL_RE = re.compile(r"https?://\S+")
 log = logging.getLogger("cli")
+
+
+# The CLI keeps a SQLite cache in its state dir. A second CLI process starting while another has the
+# file busy dies in its constructor with "database is locked" before doing any work, so retrying is
+# safe. Seen in practice when create-folder or an upload started next to a running upload.
+BUSY_MARKERS = ("database is locked", "SQLITE_BUSY")
+BUSY_ATTEMPTS = 5
+
+
+def is_busy(text: str) -> bool:
+    return any(m in text for m in BUSY_MARKERS)
 
 
 MIN_ACTIVITY_BYTES = 64 * 1024  # movement below this over the stall window counts as "nothing happening"
@@ -94,6 +106,19 @@ class ProtonCli:
         return env
 
     def _run(self, args: list[str], timeout: float, quiet: bool = False) -> CliResult:
+        for attempt in range(1, BUSY_ATTEMPTS + 1):
+            res = self._run_once(args, timeout, quiet)
+            if res.ok or not is_busy(res.out) or attempt == BUSY_ATTEMPTS:
+                return res
+            self._busy_wait(args, attempt)
+        return res
+
+    def _busy_wait(self, args: list[str], attempt: int) -> None:
+        log.warning("cli_busy cmd=%r retry %d/%d (CLI cache locked by another CLI process)",
+                    " ".join(args[:2]), attempt, BUSY_ATTEMPTS - 1)
+        time.sleep(random.uniform(1.0, 3.0))
+
+    def _run_once(self, args: list[str], timeout: float, quiet: bool = False) -> CliResult:
         try:
             with self._meta_lock:
                 p = subprocess.run([self.binary, *args], capture_output=True, text=True,
@@ -167,13 +192,16 @@ class ProtonCli:
 
     def upload(self, local_files: list[str], remote_dir: str, timeout: float) -> CliResult:
         # Strategies are mandatory: without them the CLI prompts and a service hangs.
-        return self._run_watched(
-            ["filesystem", "upload",
-             "--file-conflict-strategy", self.file_strategy,
-             "--folder-conflict-strategy", self.folder_strategy,
-             *local_files, remote_dir],
-            timeout,
-        )
+        args = ["filesystem", "upload",
+                "--file-conflict-strategy", self.file_strategy,
+                "--folder-conflict-strategy", self.folder_strategy,
+                *local_files, remote_dir]
+        for attempt in range(1, BUSY_ATTEMPTS + 1):
+            res = self._run_watched(args, timeout)
+            if res.ok or not is_busy(res.out) or attempt == BUSY_ATTEMPTS:
+                return res
+            self._busy_wait(args, attempt)
+        return res
 
     def _run_watched(self, args: list[str], timeout: float) -> CliResult:
         """Like _run, but kills the process if it makes no progress for `stall_s` (exit code 125).

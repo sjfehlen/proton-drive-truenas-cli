@@ -30,6 +30,8 @@ a dry run and a real upload.
 - **Two uploads at once work.** A second CLI process alongside a running upload finished cleanly (3 files, 163 MiB in 90 s, no lock collisions) and raised combined throughput from about 2.8 to 3.8 MB/s (1.37x, noisy baseline). The line (Spectrum, roughly 40-45 Mbps up) was close to full, so more than 2 workers is unlikely to help.
 - Short calls (`list`, `info`, `create-folder`) are still serialized in the app; they ran fine next to uploads when tried by hand.
 
+- **Overlapping CLI processes can fail with `SQLiteError: database is locked (SQLITE_BUSY)`.** The CLI opens a SQLite cache in its state dir at startup. A `create-folder` (and probably any call) that starts while another process has it busy dies before doing any work. Seen with two parallel uploads: 5 `create-folder` calls failed in one run and skipped 24 files. The adapter now retries these up to 5 times with a 1-3 s random wait (log line `cli_busy`). Likely also the cause of the one-off "session dead" result seen earlier.
+
 ## Still to test
 
 1. Recreate the container (not just the process) and confirm the session survives in the mounted volume.
