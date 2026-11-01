@@ -460,3 +460,41 @@ def test_stopping_a_queued_job_cancels_it_before_it_starts(env, monkeypatch):
     tb.join(20)
     assert not tb.is_alive()
     assert db.last_run(b) is None  # b never started a run
+
+
+# ---- glob characters in file names (CLI 0.6.0 expands local paths as globs) ----
+
+def test_glob_escape_only_touches_the_six_glob_characters():
+    from app.cli import glob_escape as g
+    assert g("AlbumArt_{B50}_Small.jpg") == "AlbumArt_\\{B50\\}_Small.jpg"
+    assert g("IMG [1].jpg") == "IMG \\[1\\].jpg"
+    assert g("a*b?.txt") == "a\\*b\\?.txt"
+    for untouched in ("plain.txt", "a(b).txt", "hey!.txt", "back\\slash.txt", "sp ace.txt", "q'uote.txt", "$d~.txt"):
+        assert g(untouched) == untouched  # escaping these breaks the match on the real CLI
+
+
+def test_upload_passes_escaped_paths_to_the_cli(env):
+    db, cli, runner, src, log = env
+    (src / "AlbumArt_{B50}.jpg").write_text("x")
+    (src / "IMG [1].jpg").write_text("x")
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *", ["skip/**", "a/**"])
+    assert runner.run_job(jid) == "ok"
+    args = [a for u in uploads(log) for a in u]
+    assert any(a.endswith("AlbumArt_\\{B50\\}.jpg") for a in args)
+    assert any(a.endswith("IMG \\[1\\].jpg") for a in args)
+    # the index and error messages still use the real names
+    assert "AlbumArt_{B50}.jpg" in db.indexed(jid) and "IMG [1].jpg" in db.indexed(jid)
+
+
+def test_unthumbnailable_image_is_retried_without_thumbnails(env, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.WARNING)
+    db, cli, runner, src, log = env
+    monkeypatch.setenv("FAKE_THUMB_FAIL", "1")
+    (src / "broken.jpg").write_text("not an image")
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *", ["skip/**", "a/**"])
+    assert runner.run_job(jid) == "ok"
+    ups = uploads(log)
+    assert len(ups) == 2 and "--skip-thumbnails" not in ups[0] and "--skip-thumbnails" in ups[1]
+    assert "cli_thumbnail_fallback" in caplog.text
+    assert "broken.jpg" in db.indexed(jid)  # indexed, so it is not retried every night

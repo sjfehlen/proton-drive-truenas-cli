@@ -16,6 +16,8 @@ a dry run and a real upload.
 | `filesystem upload -f <strategy> -d <strategy> <local...> <parent>` creates the file; values are `merge`, `keep-both`, `replace`, `skip` | Verified (0.6.0). `create-new-revision` is not available in 0.6.0 |
 | `replace` on a changed file overwrites it in place: new content, no duplicate, nothing added to `/trash` (checked 2026-11-01) | Verified (0.6.0) |
 | The session survives restarting the app process | Verified (two restarts); a full container recreate is not yet tested |
+| **Local paths are expanded as globs.** `AlbumArt_{GUID}.jpg` or `IMG [1].jpg` passed raw fail with `No paths matched`. Backslash-escaping only `* ? [ ] { }` works for every case tried. Escaping `( ) ! \\` breaks those names (taken literally), so they are passed raw. Remote folder names with glob characters work unescaped, and remote files keep their literal names | Verified (0.6.0), handled by `glob_escape()` |
+| A batch containing an image the CLI can't thumbnail fails with `Failed to generate thumbnails (use --skip-thumbnails ...)` while the rest of the batch uploads | Verified (0.6.0). The adapter retries that batch once with `--skip-thumbnails` (log `cli_thumbnail_fallback`) |
 | Strategy flags are mandatory, otherwise the CLI prompts | Documented in `--help`; we always pass them |
 
 ## Measured
@@ -46,4 +48,4 @@ a dry run and a real upload.
 3. Many small files: a tree with thousands of files and hundreds of folders. Each folder costs a probe plus a create (2-4 s each), so folder-heavy trees may be slow.
 4. Compare speed against rclone on the same data and WAN, and check whether the CLI can see files rclone already uploaded.
 5. Newer CLI builds (0.8.0+) rename strategies; re-check `--help` before upgrading.
-6. Whether more than 2 parallel uploads helps on a faster line. On a ~40-45 Mbps line, 5 workers gave about the same total speed as 2 but with more lock retries.
+6. Whether more than 2 parallel uploads helps. One 5-worker run on a ~40-45 Mbps line was **not faster** than 1-2 workers (about 1.9 MB/s overall over its first 7 minutes) and produced more lock retries. It used many small per-folder batches (3-8 files), so it is inconclusive; repeat with large batches before drawing a conclusion.

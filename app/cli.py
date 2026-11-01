@@ -89,6 +89,20 @@ def proc_activity(pid: int) -> int:
     return total
 
 
+_GLOB_CHARS = re.compile(r"([*?\[\]{}])")
+
+
+def glob_escape(path: str) -> str:
+    """Backslash-escape the characters the CLI treats as glob syntax in local path arguments.
+
+    Verified on CLI 0.6.0: it expands local paths as globs, so a file such as `AlbumArt_{GUID}.jpg` or
+    `IMG [1].jpg` fails with "No paths matched" when passed raw. Only these six characters need a
+    backslash. Escaping others breaks the match: `\\(`, `\\!` and `\\\\` are taken literally, so
+    names with parentheses, `!` or a backslash must be passed as they are.
+    """
+    return _GLOB_CHARS.sub(r"\\\1", path)
+
+
 def one_line(text: str, limit: int) -> str:
     t = " | ".join(x.strip() for x in text.splitlines() if x.strip())
     return t if len(t) <= limit else t[:limit] + "..."
@@ -240,11 +254,24 @@ class ProtonCli:
         return CliResult(True, 0, "")
 
     def upload(self, local_files: list[str], remote_dir: str, timeout: float) -> CliResult:
+        res = self._upload_with_retries(local_files, remote_dir, timeout, skip_thumbnails=False)
+        # CLI 0.6.0 refuses an image it cannot thumbnail ("Failed to generate thumbnails (use
+        # --skip-thumbnails ...)"). One corrupt or odd image would fail its batch on every run, so
+        # retry the batch without thumbnails: the file is still backed up, just without a preview.
+        if not res.ok and "Failed to generate thumbnails" in res.out:
+            log.warning("cli_thumbnail_fallback retrying batch of %d files without thumbnails", len(local_files))
+            res = self._upload_with_retries(local_files, remote_dir, timeout, skip_thumbnails=True)
+        return res
+
+    def _upload_with_retries(self, local_files: list[str], remote_dir: str, timeout: float,
+                             skip_thumbnails: bool) -> CliResult:
         # Strategies are mandatory: without them the CLI prompts and a service hangs.
         args = ["filesystem", "upload",
                 "--file-conflict-strategy", self.file_strategy,
-                "--folder-conflict-strategy", self.folder_strategy,
-                *local_files, remote_dir]
+                "--folder-conflict-strategy", self.folder_strategy]
+        if skip_thumbnails:
+            args.append("--skip-thumbnails")
+        args += [*[glob_escape(f) for f in local_files], remote_dir]
         for attempt in range(1, BUSY_ATTEMPTS + 1):
             res = self._run_watched(args, timeout)
             if res.ok or not is_busy(res.out) or attempt == BUSY_ATTEMPTS:

@@ -34,6 +34,9 @@ if args[:2] == ["filesystem", "upload"]:
         time.sleep(600)  # a silent hang
     if os.environ.get("FAKE_SLOW"):
         time.sleep(float(os.environ["FAKE_SLOW"]))
+if args[:2] == ["filesystem", "upload"] and os.environ.get("FAKE_THUMB_FAIL") == "1" and "--skip-thumbnails" not in args:
+    print("Transfer summary:\n  Uploaded: 1 items\n  Failed: 1 items\n  - x.jpg: ValidationError: Failed to generate thumbnails (use --skip-thumbnails to upload without thumbnails)")
+    sys.exit(1)
 if args[:2] == ["filesystem", "upload"] and os.environ.get("FAKE_UPLOAD_FAIL") == "1":
     print("boom")
     sys.exit(1)

@@ -14,6 +14,7 @@ A small container that runs scheduled one-way backups to Proton Drive using Prot
 - **Parallel uploads, adjustable live.** The **Parallel uploads** setting on the page (1–8, default 2) controls how many batches upload at once. It is saved, applies immediately without a restart, and a saved value overrides `UPLOAD_WORKERS`. Folders are created one at a time first, so parallel uploads never race on mkdir.
 - **Stop job.** Each running or queued job has a **Stop** button. It kills that job's running CLI uploads, skips the rest, and marks the run *stopped*. Files from finished batches are kept and the next run continues. A stop sends **no** Uptime Kuma alert, because it was deliberate. Stopping a queued job cancels it before it starts.
 - **Stall watchdog.** A CLI that moves no data (disk or network) for `STALL_SECONDS` is killed and its batch retried once.
+- **Odd file names and images.** The CLI expands local paths as globs, so names containing `{ } [ ] * ?` are escaped automatically. A batch holding an image the CLI cannot thumbnail is retried without thumbnails, so one corrupt photo cannot fail a backup forever.
 - **Lock retries.** Overlapping CLI processes can fail with `SQLite … database is locked` at startup; those calls are retried automatically (see [docs/cli-notes.md](docs/cli-notes.md)).
 - **Live progress.** While a job runs the page shows batches done, uploads in flight, bytes uploaded, elapsed time and an estimate. The page never waits on the CLI.
 - **Fails loudly.** Pings Uptime Kuma `up` on success and `down` with a short reason on failure — including "session expired, log in" before any work is attempted. An optional staleness ping fires if no job has succeeded in `STALE_DAYS`.
@@ -44,7 +45,7 @@ The page uses relative links, so it also works behind a path-prefix proxy such a
 | `FILE_CONFLICT_STRATEGY`, `FOLDER_CONFLICT_STRATEGY` | `replace`, `merge` | Passed to `filesystem upload` (values valid in CLI 0.6.0: merge, keep-both, replace, skip) |
 | `PROTON_CLI_BIN` | `proton-drive` | CLI path |
 | `BATCH_FILES`, `BATCH_MB` | `25`, `500` | Max files and megabytes per CLI upload call. A failure or stall costs at most one batch. Larger batches (50 files / 2000 MB) were used in testing |
-| `UPLOAD_WORKERS` | `2` | **Starting value** for parallel uploads (1–8). Once changed on the page, the saved value wins. Measured on CLI 0.6.0: two uploads raised throughput about 1.4x on a ~40–45 Mbps line; more mostly adds retries |
+| `UPLOAD_WORKERS` | `2` | **Starting value** for parallel uploads (1–8). Once changed on the page, the saved value wins. Measured on CLI 0.6.0: two uploads raised throughput about 1.4x on a ~40–45 Mbps line. A five-worker test was not faster and had more lock retries (inconclusive: small batches) |
 | `STALL_SECONDS` | `600` | An upload that moves no data for this long is killed and the batch retried once. Measured pauses on CLI 0.6.0 reach about 4 minutes, so don't set this low |
 
 ## Develop
@@ -74,6 +75,7 @@ Everything goes to stdout, one event per line, so a Docker log collector picks i
 | `... batch 3/12 done: N files, X MB in Ns (X MB/s); total ...` | INFO | One line per finished batch, with its speed |
 | `... batch N/M stalled; retrying (1/1)` | WARNING | The watchdog killed a stalled upload |
 | `cli_failed cmd='filesystem upload' exit=1 out='...'` | WARNING | Any CLI call that failed, with its output. Exit 125 = stalled, 124 = timed out, 130 = stopped by you |
+| `cli_thumbnail_fallback retrying batch of N files without thumbnails` | WARNING | The CLI could not thumbnail an image; the batch is retried with `--skip-thumbnails` |
 | `cli_busy cmd='...' retry N/4 (CLI cache locked by another CLI process)` | WARNING | A call hit `database is locked` and is being retried |
 | `... error place='upload /my-files/X' exit 1: ...; batch 3/12 of 50 files, 2.0 GB: a.jpg, b.jpg, c.jpg (+47 more)` | ERROR | One per failed batch or folder, naming the files |
 | `stop requested for job id=N` | WARNING | You pressed Stop |
