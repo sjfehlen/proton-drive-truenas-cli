@@ -72,3 +72,17 @@ def test_run_detail_page_shows_errors_escaped(env, monkeypatch):
     assert "&lt;b&gt;bad&lt;/b&gt;" in page and "<b>bad</b>" not in page
     assert c.get("/runs/9999", auth=a).status_code == 404
     assert f"runs/{rid}" in c.get("/", auth=a).text
+
+
+def test_page_does_not_block_while_cli_is_busy(env, monkeypatch):
+    import time as _t
+    c, db, src = make(env, monkeypatch)
+    cli = env[1]
+    assert cli._cli_lock.acquire(timeout=1)  # simulate a long-running upload holding the CLI
+    try:
+        t0 = _t.time()
+        r = c.get("/", auth=("admin", "pw"))
+        assert r.status_code == 200 and _t.time() - t0 < 5
+        assert "unknown" in r.text
+    finally:
+        cli._cli_lock.release()

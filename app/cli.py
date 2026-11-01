@@ -56,7 +56,7 @@ class ProtonCli:
         env["XDG_DATA_HOME"] = self.session_dir
         return env
 
-    def _run(self, args: list[str], timeout: float) -> CliResult:
+    def _run(self, args: list[str], timeout: float, quiet: bool = False) -> CliResult:
         try:
             with self._cli_lock:
                 p = subprocess.run([self.binary, *args], capture_output=True, text=True,
@@ -68,7 +68,7 @@ class ProtonCli:
             log.error("cli_failed cmd=%r exit=127 out='CLI not found: %s'", " ".join(args[:2]), self.binary)
             return CliResult(False, 127, f"CLI not found: {self.binary}")
         res = CliResult(p.returncode == 0, p.returncode, (p.stdout + p.stderr).strip())
-        if not res.ok:
+        if not res.ok and not quiet:
             log.warning("cli_failed cmd=%r exit=%d out=%r", " ".join(args[:2]), res.code, one_line(res.out, 400))
         return res
 
@@ -83,11 +83,21 @@ class ProtonCli:
             r = self._run(["filesystem", "list", "/my-files"], 60)
         return r
 
-    def session_status_cached(self, max_age: float = 30.0) -> CliResult:
-        """For the web page, so reloads don't spawn a CLI process each time."""
+    @property
+    def busy(self) -> bool:
+        """True while a CLI process is running (e.g. a long upload)."""
+        return self._cli_lock.locked()
+
+    def session_status_cached(self, max_age: float = 30.0) -> CliResult | None:
+        """For the web page. Never waits: the page must stay responsive during a long upload.
+
+        Returns the cached result if fresh, None if a CLI call is in progress and nothing is cached.
+        """
         now = time.time()
         if self._status and now - self._status[0] < max_age:
             return self._status[1]
+        if self.busy:
+            return self._status[1] if self._status else None
         r = self.session_ok()
         self._status = (now, r)
         return r
@@ -96,7 +106,8 @@ class ProtonCli:
         self._status = None
 
     def folder_exists(self, path: str) -> bool:
-        return self._run(["filesystem", "info", path], 60).ok
+        # A missing folder is an expected answer here, so a non-zero exit is not logged as a failure.
+        return self._run(["filesystem", "info", path], 60, quiet=True).ok
 
     def create_folder(self, parent: str, name: str) -> CliResult:
         # CLI 0.6.0 syntax: create-folder parentPath name

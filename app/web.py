@@ -52,7 +52,10 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
     @app.get("/", response_class=HTMLResponse, dependencies=[Depends(auth)])
     def index():
         s = cli.session_status_cached()
-        state = '<b class="ok">logged in</b>' if s.ok else f'<b class="failed">not logged in</b> (exit {s.code})'
+        if s is None:
+            state = '<b class="running">unknown</b> (a job is using the Proton CLI; checked again when it finishes)'
+        else:
+            state = '<b class="ok">logged in</b>' if s.ok else f'<b class="failed">not logged in</b> (exit {s.code})'
         if login.running:
             link = f'<a href="{esc(login.url)}" target="_blank" rel="noopener noreferrer">{esc(login.url)}</a>' if login.url else "waiting for URL..."
             lg = f"<p>Login in progress: open {link}, finish signing in, then reload. <form class='inline' method=post action=login/cancel><button>Cancel</button></form></p>"
