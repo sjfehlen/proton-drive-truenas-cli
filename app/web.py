@@ -54,6 +54,8 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
         s = cli.session_status_cached()
         if s is None:
             state = '<b class="running">unknown</b> (a job is using the Proton CLI; checked again when it finishes)'
+        elif s.code == 127:
+            state = f'<b class="failed">Proton CLI not found</b> at <code>{esc(cli.binary)}</code> &mdash; mount the binary (see the README)'
         else:
             state = '<b class="ok">logged in</b>' if s.ok else f'<b class="failed">not logged in</b> (exit {s.code})'
         if login.running:
@@ -67,15 +69,12 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
         running = ""
         if pr:
             now = time.time()
-            rate = pr["done_bytes"] / max(now - pr["started"], 1)
-            left = max(pr["bytes"] - pr["done_bytes"], 0)
-            eta = f", about {int(left / rate / 60)} min left" if rate > 0 and pr["done_bytes"] else ""
             running = (f"<p class=running><b>Running: {esc(pr['job'])}</b> (run <a href=runs/{pr['run']}>{pr['run']}</a>) &mdash; "
                        f"{pr['batch']}/{pr['batches']} batches done, {pr.get('active', 0)} uploading "
                        f"(up to {cli.upload_workers} at once); "
                        f"{pr['uploaded']}/{pr['files']} files, {human(pr['done_bytes'])} of {human(pr['bytes'])} uploaded"
                        f"{', ' + str(pr['failed']) + ' failed' if pr['failed'] else ''}; "
-                       f"{int(now - pr['started'])}s elapsed{eta}. Reload to refresh.</p>")
+                       f"{int(now - pr['started'])}s elapsed. Progress counts a batch only when it finishes. Reload to refresh.</p>")
         rows = ""
         for j in db.jobs():
             r = db.last_run(j["id"])

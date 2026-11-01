@@ -1,24 +1,29 @@
-# Example only. Adjust the host paths, port and image before use. Check the port against your port registry.
-# Secrets (UI_PASSWORD, Kuma push URLs) belong in the stack's .env or the UI, never in this file.
+# Example for Arcane on bender. Adjust host paths and the port (check the port registry).
+# Secrets (UI_PASSWORD) belong in the stack's .env, never in this file. In an Arcane .env a literal
+# `$` must be written `$$`.
 services:
   proton-backup:
-    build:
-      context: .
-      args:
-        PROTON_CLI_URL: ${PROTON_CLI_URL}
-        PROTON_CLI_SHA256: ${PROTON_CLI_SHA256}
+    image: ghcr.io/sjfehlen/proton-drive-truenas-cli:main
     container_name: proton-backup
     restart: unless-stopped
+    user: "568:568"
     ports:
-      - "${HOST_PORT:-30400}:8080"
+      - "30465:8080"
     environment:
+      TZ: America/Chicago
       UI_USER: ${UI_USER:-admin}
       UI_PASSWORD: ${UI_PASSWORD:?set UI_PASSWORD}
+      UPLOAD_WORKERS: "2"        # starting value; the page's setting overrides it once saved
+      BATCH_FILES: "50"
+      BATCH_MB: "2000"
+      STALL_SECONDS: "600"
       STALE_DAYS: "3"
-      # STALE_PING_URL: optional Uptime Kuma push URL, pinged "down" if no job has succeeded in STALE_DAYS
+      # STALE_PING_URL: optional Uptime Kuma push URL, pinged "down" if no job succeeds in STALE_DAYS
     volumes:
-      # State DB and the Proton session file (credential): keep on a host-path dataset, mode 700.
-      - /mnt/Storage/Application/ProtonBackup:/data
-      # Sources are read-only.
+      # State DB and the Proton session file (a credential): host-path dataset, owned by 568, mode 700.
+      - /mnt/Storage/Application/Arcane/proton-backup/data:/data
+      # Proton's CLI binary, downloaded from Proton and made executable. Not part of the image.
+      - /mnt/Storage/Application/Arcane/proton-backup/bin/proton-drive:/opt/proton/proton-drive:ro
+      # Backup sources, read-only. Add one line per job source.
       - /mnt/Storage/Application/Immich:/sources/immich:ro
       - /mnt/Storage/GeneralFiles:/sources/generalfiles:ro

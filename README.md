@@ -25,10 +25,14 @@ Not in v0: remote deletes (copy only), restore UI, multiple accounts, running se
 
 ## Run it
 
-1. Download the Linux `proton-drive` CLI from Proton ([support page](https://proton.me/support/drive-cli)), host it where you control it, and note its SHA-256. Developed against CLI 0.6.0; pin whichever version you test.
-2. Copy [compose.example.yaml](compose.example.yaml), set `PROTON_CLI_URL`, `PROTON_CLI_SHA256`, `UI_PASSWORD`, and your host paths.
-3. `docker compose up -d --build`, open the page, click **Log in to Proton**, open the URL it shows, finish signing in.
+The image does **not** contain Proton's CLI. Download the Linux `proton-drive` binary from Proton ([support page](https://proton.me/support/drive-cli)), make it executable, and mount it into the container. Developed against CLI 0.6.0; pin whichever version you test.
+
+1. Put the binary on the host, for example `/mnt/Storage/Application/Arcane/proton-backup/bin/proton-drive`, and create the data folder (owned by the container user, mode 700).
+2. Use [compose.example.yaml](compose.example.yaml): it pulls `ghcr.io/sjfehlen/proton-drive-truenas-cli:main` (built by [.github/workflows/image.yml](.github/workflows/image.yml)). Set `UI_PASSWORD` and your host paths.
+3. Start it, open the page, click **Log in to Proton**, open the URL it shows, finish signing in.
 4. Add a job and run it with **Dry run** first.
+
+To run without Docker: `uv sync && DATA_DIR=./data UI_PASSWORD=... PROTON_CLI_BIN=$(which proton-drive) uv run python -m app.main`.
 
 The UI refuses to start without `UI_PASSWORD` (set `ALLOW_NO_AUTH=1` for local testing only). Do not expose it to the internet without SSO in front.
 

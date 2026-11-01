@@ -22,6 +22,7 @@ def build():
     logging.getLogger("uvicorn.access").addFilter(_NoHealthz())
     data = os.environ.get("DATA_DIR", "/data")
     os.makedirs(os.path.join(data, "session"), mode=0o700, exist_ok=True)
+    os.makedirs(os.path.join(data, "home"), mode=0o700, exist_ok=True)  # HOME for the CLI in the container
     db = Db(os.path.join(data, "state.db"))
     db.mark_stale_runs()
     cli = ProtonCli(session_dir=os.path.join(data, "session"))

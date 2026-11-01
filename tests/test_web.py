@@ -145,3 +145,10 @@ def test_stop_button_only_while_running_and_posts_stop(env, monkeypatch):
     finally:
         runner.busy_job = None
     assert c.post(f"/jobs/{jid}/stop", auth=("admin", "bad"), follow_redirects=False).status_code == 401
+
+
+def test_page_says_so_when_the_cli_binary_is_missing(env, monkeypatch):
+    c, db, src = make(env, monkeypatch)
+    env[1].binary = "/nonexistent/proton-drive"
+    page = c.get("/", auth=("admin", "pw")).text
+    assert "Proton CLI not found" in page and "/nonexistent/proton-drive" in page

@@ -1,29 +1,25 @@
 FROM python:3.12-slim
 
-# The official proton-drive CLI is not baked in from a guessed URL. Download the Linux build from
-# https://proton.me/drive/cli (or the page it links to), host it somewhere you control, and pass it:
-#   docker build --build-arg PROTON_CLI_URL=https://.../proton-drive --build-arg PROTON_CLI_SHA256=<sum> .
-# Pin the version. Tested against CLI 0.6.0.
-ARG PROTON_CLI_URL
-ARG PROTON_CLI_SHA256
-ARG UID=1000
+# Proton's `proton-drive` CLI is deliberately NOT in this image. Mount the Linux binary at
+# /opt/proton/proton-drive (read-only) from a host folder, so the image contains nothing of
+# Proton's, can be public, and the CLI can be updated without a rebuild. The CLI is a standalone
+# binary that needs only glibc, which this base image has.
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN test -n "$PROTON_CLI_URL" && test -n "$PROTON_CLI_SHA256" \
-    && curl -fsSL "$PROTON_CLI_URL" -o /usr/local/bin/proton-drive \
-    && echo "$PROTON_CLI_SHA256  /usr/local/bin/proton-drive" | sha256sum -c - \
-    && chmod 0755 /usr/local/bin/proton-drive
-
 WORKDIR /srv
-COPY pyproject.toml ./
-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" croniter python-multipart
+# Versions the test suite ran against.
+RUN pip install --no-cache-dir "fastapi==0.162.0" "uvicorn[standard]==0.54.0" "croniter==6.2.4" "python-multipart==0.0.33"
 COPY app ./app
 
-RUN useradd -u ${UID} -m runner && mkdir -p /data && chown runner /data
+# 568 matches the owner of /mnt/Storage/Application/Arcane/* on bender.
+ARG UID=568
+RUN useradd -u ${UID} -M -d /data/home runner
 USER runner
-ENV DATA_DIR=/data PORT=8080 PYTHONUNBUFFERED=1
+
+ENV DATA_DIR=/data HOME=/data/home PORT=8080 PYTHONUNBUFFERED=1 \
+    PROTON_CLI_BIN=/opt/proton/proton-drive
 EXPOSE 8080
-HEALTHCHECK --interval=60s --timeout=5s CMD curl -fs http://127.0.0.1:8080/healthz || exit 1
+HEALTHCHECK --interval=60s --timeout=5s --start-period=20s CMD curl -fs http://127.0.0.1:8080/healthz || exit 1
 CMD ["python", "-m", "app.main"]
