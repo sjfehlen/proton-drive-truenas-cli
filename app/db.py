@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, started REAL NOT NULL,
   finished REAL, status TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', dry_run INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS run_errors (
+  run_id INTEGER NOT NULL, ts REAL NOT NULL, place TEXT NOT NULL, message TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS run_errors_run ON run_errors(run_id);
 CREATE TABLE IF NOT EXISTS files (
   job_id INTEGER NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mtime REAL NOT NULL,
   PRIMARY KEY (job_id, path)
@@ -99,6 +103,20 @@ class Db:
         with self.tx() as c:
             c.execute("UPDATE runs SET status='failed', summary='interrupted by restart', finished=? "
                       "WHERE status='running'", (time.time(),))
+
+    def add_error(self, run_id: int, place: str, message: str) -> None:
+        with self.tx() as c:
+            c.execute("INSERT INTO run_errors(run_id,ts,place,message) VALUES(?,?,?,?)",
+                      (run_id, time.time(), place, message))
+
+    def run_errors(self, run_id: int) -> list[sqlite3.Row]:
+        with self.tx() as c:
+            return c.execute("SELECT * FROM run_errors WHERE run_id=? ORDER BY ts", (run_id,)).fetchall()
+
+    def run(self, run_id: int) -> sqlite3.Row | None:
+        with self.tx() as c:
+            return c.execute("SELECT r.*, j.name FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.id=?",
+                             (run_id,)).fetchone()
 
     # uploaded-file index
     def indexed(self, job_id: int) -> dict[str, tuple[int, float]]:

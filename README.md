@@ -47,3 +47,19 @@ uv run pytest
 - The Proton session file in `DATA_DIR/session` grants access to the whole Proton account. Treat it like a password.
 - Kuma push URLs contain tokens. They are stored in the DB, never rendered in the UI, and never logged.
 - Sources are mounted read-only; the container runs as a non-root user.
+
+## Logs
+
+Everything goes to stdout, one event per line, so a Docker log collector picks it up. Every line for a run carries `job=<name> run=<id>`.
+
+| Line | Level | Meaning |
+|---|---|---|
+| `... start dry_run=... source=... dest=...` | INFO | A run began |
+| `... scan done: N scanned, N unchanged, N to upload in N folders` | INFO | Local scan finished |
+| `... progress: x/y uploaded, z failed` | INFO | Every 60 s during long uploads |
+| `cli_failed cmd='filesystem upload' exit=1 out='...'` | WARNING | Any CLI call that failed, with its output |
+| `... error place='upload /my-files/X' exit 1: ...; batch of 50: a.jpg, b.jpg, c.jpg (+47 more)` | ERROR | One per failed batch or folder, naming the files |
+| `... status=ok\|failed ... N uploaded, N failed` | INFO / ERROR | Run result. **Failed runs are ERROR**, so a Loki alert can match `status=failed` |
+| `kuma ping failed (<job>): <ExceptionType>` | WARNING | The success/failure ping could not be delivered |
+
+The first 200 errors of each run are also stored and shown on the run's page (click the job name under **Recent runs**). Later errors appear only in the container log. Secrets are never logged: not the Kuma push URL, the login URL or the session.

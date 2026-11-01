@@ -5,6 +5,7 @@ Checked against proton-drive CLI 0.6.0; see docs/cli-notes.md.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -13,6 +14,12 @@ import time
 from dataclasses import dataclass
 
 URL_RE = re.compile(r"https?://\S+")
+log = logging.getLogger("cli")
+
+
+def one_line(text: str, limit: int) -> str:
+    t = " | ".join(x.strip() for x in text.splitlines() if x.strip())
+    return t if len(t) <= limit else t[:limit] + "..."
 
 
 @dataclass
@@ -55,10 +62,15 @@ class ProtonCli:
                 p = subprocess.run([self.binary, *args], capture_output=True, text=True,
                                    timeout=timeout, env=self._env())
         except subprocess.TimeoutExpired:
+            log.warning("cli_failed cmd=%r exit=124 out='timed out after %ss'", " ".join(args[:2]), int(timeout))
             return CliResult(False, 124, "timed out")
         except FileNotFoundError:
+            log.error("cli_failed cmd=%r exit=127 out='CLI not found: %s'", " ".join(args[:2]), self.binary)
             return CliResult(False, 127, f"CLI not found: {self.binary}")
-        return CliResult(p.returncode == 0, p.returncode, (p.stdout + p.stderr).strip())
+        res = CliResult(p.returncode == 0, p.returncode, (p.stdout + p.stderr).strip())
+        if not res.ok:
+            log.warning("cli_failed cmd=%r exit=%d out=%r", " ".join(args[:2]), res.code, one_line(res.out, 400))
+        return res
 
     def session_ok(self) -> CliResult:
         """A cheap authenticated call. A dead session exits 1 with "You need to login first".

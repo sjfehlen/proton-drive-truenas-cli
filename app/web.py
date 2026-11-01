@@ -72,7 +72,7 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
                      f"<form class=inline method=post action=jobs/{j['id']}/dryrun><button>Dry run</button></form> "
                      f"<form class=inline method=post action=jobs/{j['id']}/toggle><button>{'Disable' if j['enabled'] else 'Enable'}</button></form> "
                      f"<form class=inline method=post action=jobs/{j['id']}/delete onsubmit=\"return confirm('Delete job?')\"><button>Delete</button></form></td></tr>")
-        hist = "".join(f"<tr><td>{esc(r['name'])}{' (dry)' if r['dry_run'] else ''}</td>"
+        hist = "".join(f"<tr><td><a href=runs/{r['id']}>{esc(r['name'])}</a>{' (dry)' if r['dry_run'] else ''}</td>"
                        f"<td class='{esc(r['status'])}'>{esc(r['status'])}</td>"
                        f"<td>{time.strftime('%m-%d %H:%M', time.localtime(r['started']))}</td><td>{esc(r['summary'])}</td></tr>"
                        for r in db.recent_runs())
@@ -86,6 +86,20 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
 <input name=excludes size=60 placeholder="excludes, comma separated, e.g. Data-Storage/thumbs/**"><br>
 <input name=kuma_url size=60 placeholder="Uptime Kuma push URL (secret)"> <button>Add</button></form>
 <h2>Recent runs</h2><table><tr><th>Job</th><th>Status</th><th>Started</th><th>Summary</th></tr>{hist}</table>"""
+
+    @app.get("/runs/{run_id}", response_class=HTMLResponse, dependencies=[Depends(auth)])
+    def run_detail(run_id: int):
+        r = db.run(run_id)
+        if r is None:
+            raise HTTPException(404, "no such run")
+        errs = db.run_errors(run_id)
+        rows = "".join(f"<tr><td>{time.strftime('%H:%M:%S', time.localtime(e['ts']))}</td><td>{esc(e['place'])}</td>"
+                       f"<td>{esc(e['message'])}</td></tr>" for e in errs) or "<tr><td colspan=3>no errors recorded</td></tr>"
+        return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><title>Run {run_id}</title>{STYLE}
+<p><a href="../">&larr; back</a></p><h1>Run {run_id}: {esc(r['name'])}</h1>
+<p class="{esc(r['status'])}"><b>{esc(r['status'])}</b>{' (dry run)' if r['dry_run'] else ''} &middot;
+{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(r['started']))}</p><p>{esc(r['summary'])}</p>
+<h2>Errors ({len(errs)})</h2><table><tr><th>Time</th><th>Where</th><th>Message</th></tr>{rows}</table>"""
 
     @app.post("/login", dependencies=[Depends(auth)])
     def start_login():

@@ -150,3 +150,40 @@ def test_login_required_is_not_retried(env, monkeypatch):
     runner.run_job(db.add_job("t", str(src), "/my-files/B", "0 4 * * *"))
     lists = [c for c in calls(log) if c[:2] == ["filesystem", "list"]]
     assert len(lists) == 1
+
+
+def test_failures_are_logged_stored_and_named(env, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.INFO)
+    db, cli, runner, src, log = env
+    monkeypatch.setenv("FAKE_UPLOAD_FAIL", "1")
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *", ["skip/**"])
+    assert runner.run_job(jid) == "failed"
+    run_id = db.last_run(jid)["id"]
+    stored = db.run_errors(run_id)
+    assert len(stored) == 2  # one per failed batch (root dir and a/)
+    assert all("boom" in e["message"] and "exit 1" in e["message"] for e in stored)
+    assert any("one.txt" in e["message"] for e in stored)  # names the files in the batch
+    text = caplog.text
+    assert "cli_failed" in text and "start dry_run" in text and "scan done" in text
+    assert "ERROR" in text and f"run={run_id} status=failed" in text
+    assert "see run" in db.last_run(jid)["summary"]
+
+
+def test_session_failure_records_cli_output(env, monkeypatch, caplog):
+    db, cli, runner, src, log = env
+    monkeypatch.setenv("FAKE_DEAD", "1")
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *")
+    runner.run_job(jid)
+    errs = db.run_errors(db.last_run(jid)["id"])
+    assert errs and errs[0]["place"] == "session" and "login" in errs[0]["message"]
+
+
+def test_error_storage_is_capped(env):
+    db, cli, runner, src, log = env
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *")
+    job = db.job(jid)
+    rid = db.start_run(jid, False)
+    for i in range(runner.MAX_STORED_ERRORS + 50):
+        runner._error(job, rid, "x", f"e{i}")
+    assert len(db.run_errors(rid)) == runner.MAX_STORED_ERRORS + 1  # + the "limit" marker

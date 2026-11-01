@@ -59,3 +59,16 @@ def test_duplicate_job_name_is_a_409_not_a_500(env, monkeypatch):
     form = {"name": "dup", "source": str(src), "dest": "/my-files/B", "cron": "0 4 * * *"}
     assert c.post("/jobs", auth=a, data=form, follow_redirects=False).status_code == 303
     assert c.post("/jobs", auth=a, data=form, follow_redirects=False).status_code == 409
+
+
+def test_run_detail_page_shows_errors_escaped(env, monkeypatch):
+    c, db, src = make(env, monkeypatch)
+    a = ("admin", "pw")
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *")
+    rid = db.start_run(jid, False)
+    db.add_error(rid, "upload /my-files/B", "exit 1: <b>bad</b>")
+    db.finish_run(rid, "failed", "1 failed")
+    page = c.get(f"/runs/{rid}", auth=a).text
+    assert "&lt;b&gt;bad&lt;/b&gt;" in page and "<b>bad</b>" not in page
+    assert c.get("/runs/9999", auth=a).status_code == 404
+    assert f"runs/{rid}" in c.get("/", auth=a).text

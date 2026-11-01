@@ -42,7 +42,8 @@ class Scheduler:
             return
         last = self.db.last_success()
         if last is not None and now - last > self.stale_days * 86400:
-            ping(self.stale_ping_url, False, f"no successful backup in {self.stale_days} days")
+            log.error("no successful backup in %d days", self.stale_days)
+            ping(self.stale_ping_url, False, f"no successful backup in {self.stale_days} days", "staleness")
 
     def loop(self) -> None:
         while not self._stop.wait(30):

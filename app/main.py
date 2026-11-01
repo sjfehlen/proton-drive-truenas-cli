@@ -12,8 +12,14 @@ from .scheduler import Scheduler
 from .web import create_app
 
 
+class _NoHealthz(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "/healthz" not in record.getMessage()
+
+
 def build():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logging.getLogger("uvicorn.access").addFilter(_NoHealthz())
     data = os.environ.get("DATA_DIR", "/data")
     os.makedirs(os.path.join(data, "session"), mode=0o700, exist_ok=True)
     db = Db(os.path.join(data, "state.db"))
