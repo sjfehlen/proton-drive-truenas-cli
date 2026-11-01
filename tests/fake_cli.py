@@ -8,8 +8,13 @@ args = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(json.dumps(args) + "\n")
 
+flaky = os.environ.get("FAKE_FLAKY_ONCE")
+if flaky and args[:2] == ["filesystem", "list"] and not os.path.exists(flaky):
+    open(flaky, "w").close()
+    print("lock busy")
+    sys.exit(1)
 if os.environ.get("FAKE_DEAD") == "1":
-    print("Not logged in")
+    print("You need to login first")
     sys.exit(1)
 if args[:2] == ["filesystem", "info"]:
     sys.exit(0 if args[2] in os.environ.get("FAKE_EXISTING", "/my-files").split(",") else 1)

@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 
 URL_RE = re.compile(r"https?://\S+")
@@ -33,6 +34,10 @@ class ProtonCli:
         # Remote folders already confirmed this run. Each CLI call costs 2-4 s of network round trip,
         # so don't re-probe shared parents. Cleared at the start of every run.
         self.known_folders: set[str] = set()
+        # The CLI keeps lock files (events.lock) in its state dir, so overlapping invocations can
+        # fail spuriously. Run one CLI process at a time.
+        self._cli_lock = threading.Lock()
+        self._status: tuple[float, CliResult] | None = None
 
     def reset_cache(self) -> None:
         self.known_folders.clear()
@@ -46,8 +51,9 @@ class ProtonCli:
 
     def _run(self, args: list[str], timeout: float) -> CliResult:
         try:
-            p = subprocess.run([self.binary, *args], capture_output=True, text=True,
-                               timeout=timeout, env=self._env())
+            with self._cli_lock:
+                p = subprocess.run([self.binary, *args], capture_output=True, text=True,
+                                   timeout=timeout, env=self._env())
         except subprocess.TimeoutExpired:
             return CliResult(False, 124, "timed out")
         except FileNotFoundError:
@@ -55,8 +61,27 @@ class ProtonCli:
         return CliResult(p.returncode == 0, p.returncode, (p.stdout + p.stderr).strip())
 
     def session_ok(self) -> CliResult:
-        """A cheap authenticated call. A dead session exits 1 with the reason on stdout."""
-        return self._run(["filesystem", "list", "/my-files"], 60)
+        """A cheap authenticated call. A dead session exits 1 with "You need to login first".
+
+        Any other failure (lock contention, network blip) is retried once before it is believed.
+        """
+        r = self._run(["filesystem", "list", "/my-files"], 60)
+        if not r.ok and "login" not in r.out.lower():
+            time.sleep(3)
+            r = self._run(["filesystem", "list", "/my-files"], 60)
+        return r
+
+    def session_status_cached(self, max_age: float = 30.0) -> CliResult:
+        """For the web page, so reloads don't spawn a CLI process each time."""
+        now = time.time()
+        if self._status and now - self._status[0] < max_age:
+            return self._status[1]
+        r = self.session_ok()
+        self._status = (now, r)
+        return r
+
+    def invalidate_status(self) -> None:
+        self._status = None
 
     def folder_exists(self, path: str) -> bool:
         return self._run(["filesystem", "info", path], 60).ok

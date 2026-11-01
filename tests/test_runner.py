@@ -134,3 +134,19 @@ def test_shared_parent_folders_probed_once_per_run(env):
     runner.run_job(jid)
     probes = [c[2] for c in calls(log) if c[:2] == ["filesystem", "info"]]
     assert len(probes) == len(set(probes))  # no path probed twice
+
+
+def test_transient_session_check_failure_is_retried(env, monkeypatch, tmp_path):
+    db, cli, runner, src, log = env
+    monkeypatch.setattr("app.cli.time.sleep", lambda s: None)
+    monkeypatch.setenv("FAKE_FLAKY_ONCE", str(tmp_path / "flaky"))
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *")
+    assert runner.run_job(jid) == "ok"
+
+
+def test_login_required_is_not_retried(env, monkeypatch):
+    db, cli, runner, src, log = env
+    monkeypatch.setenv("FAKE_DEAD", "1")
+    runner.run_job(db.add_job("t", str(src), "/my-files/B", "0 4 * * *"))
+    lists = [c for c in calls(log) if c[:2] == ["filesystem", "list"]]
+    assert len(lists) == 1

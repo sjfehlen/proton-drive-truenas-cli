@@ -51,7 +51,7 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse, dependencies=[Depends(auth)])
     def index():
-        s = cli.session_ok()
+        s = cli.session_status_cached()
         state = '<b class="ok">logged in</b>' if s.ok else f'<b class="failed">not logged in</b> (exit {s.code})'
         if login.running:
             link = f'<a href="{esc(login.url)}" target="_blank" rel="noopener noreferrer">{esc(login.url)}</a>' if login.url else "waiting for URL..."
@@ -89,6 +89,7 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
 
     @app.post("/login", dependencies=[Depends(auth)])
     def start_login():
+        cli.invalidate_status()
         login.start()
         return RedirectResponse("./", 303)
 
