@@ -275,3 +275,46 @@ def test_persistent_stall_fails_the_batch_with_a_clear_error(env, monkeypatch):
     errs = db.run_errors(db.last_run(jid)["id"])
     assert errs and "stalled" in errs[0]["message"] and "exit 125" in errs[0]["message"]
     assert db.indexed(jid) == {}
+
+
+def test_uploads_run_in_parallel_up_to_the_worker_limit(env, monkeypatch):
+    db, cli, runner, src, log = env
+    monkeypatch.setattr("app.runner.BATCH_FILES", 1)
+    monkeypatch.setenv("FAKE_SLOW", "2")
+    for i in range(3):
+        (src / f"p{i}.txt").write_text("x")
+    cli.upload_workers = 2
+    import threading as th
+    cli._upload_slots = th.Semaphore(2)
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *", ["skip/**", "a/**"])  # 4 files -> 4 batches
+    t0 = time.time()
+    assert runner.run_job(jid) == "ok"
+    took = time.time() - t0
+    assert len(uploads(log)) == 4
+    assert took < 7.5, took  # serial would be >= 8 s of sleeping alone
+
+
+def test_one_worker_stays_serial(env, monkeypatch):
+    db, cli, runner, src, log = env
+    monkeypatch.setattr("app.runner.BATCH_FILES", 1)
+    monkeypatch.setenv("FAKE_SLOW", "1")
+    (src / "extra.txt").write_text("x")
+    import threading as th
+    cli.upload_workers = 1
+    cli._upload_slots = th.Semaphore(1)
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *", ["skip/**", "a/**"])  # 2 files -> 2 batches
+    t0 = time.time()
+    assert runner.run_job(jid) == "ok"
+    assert time.time() - t0 >= 2.0
+
+
+def test_parallel_run_indexes_every_file_exactly_once(env, monkeypatch):
+    db, cli, runner, src, log = env
+    monkeypatch.setattr("app.runner.BATCH_FILES", 1)
+    for i in range(6):
+        (src / f"q{i}.txt").write_text("x")
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *", ["skip/**"])
+    assert runner.run_job(jid) == "ok"
+    idx = db.indexed(jid)
+    assert len(idx) == 8 and {"top.txt", "a/one.txt", "q0.txt", "q5.txt"} <= set(idx)
+    assert runner.run_job(jid) == "ok" and len(uploads(log)) == 8  # second run uploads nothing

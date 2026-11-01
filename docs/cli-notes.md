@@ -27,6 +27,9 @@ a dry run and a real upload.
 - **Pauses are intermittent.** The same 31 MB file uploaded in about 30 s with steady traffic on one attempt, and on another attempt sat with almost no traffic for over two minutes. In the 100-file run the CLI went quiet for roughly four minutes and then resumed on its own. The stall watchdog default (600 s) is set from this.
 - A CLI process reports activity through `/proc/<pid>/io` (bytes read) and its network namespace counters; the watchdog uses both and needs Linux.
 
+- **Two uploads at once work.** A second CLI process alongside a running upload finished cleanly (3 files, 163 MiB in 90 s, no lock collisions) and raised combined throughput from about 2.8 to 3.8 MB/s (1.37x, noisy baseline). The line (Spectrum, roughly 40-45 Mbps up) was close to full, so more than 2 workers is unlikely to help.
+- Short calls (`list`, `info`, `create-folder`) are still serialized in the app; they ran fine next to uploads when tried by hand.
+
 ## Still to test
 
 1. Recreate the container (not just the process) and confirm the session survives in the mounted volume.

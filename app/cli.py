@@ -75,9 +75,12 @@ class ProtonCli:
         self.stall_s = stall_s if stall_s is not None else float(os.environ.get("STALL_SECONDS", "600"))
         self.poll_s = poll_s
         self.activity_fn = activity_fn or proc_activity
-        # The CLI keeps lock files (events.lock) in its state dir, so overlapping invocations can
-        # fail spuriously. Run one CLI process at a time.
-        self._cli_lock = threading.Lock()
+        # Short calls (list/info/create-folder) run one at a time: overlapping them once produced a
+        # spurious "session dead" result. Uploads may overlap, up to UPLOAD_WORKERS at once. Measured
+        # on CLI 0.6.0: two uploads side by side ran cleanly and raised total throughput about 1.4x.
+        self.upload_workers = max(1, int(os.environ.get("UPLOAD_WORKERS", "2")))
+        self._meta_lock = threading.Lock()
+        self._upload_slots = threading.Semaphore(self.upload_workers)
         self._status: tuple[float, CliResult] | None = None
 
     def reset_cache(self) -> None:
@@ -92,7 +95,7 @@ class ProtonCli:
 
     def _run(self, args: list[str], timeout: float, quiet: bool = False) -> CliResult:
         try:
-            with self._cli_lock:
+            with self._meta_lock:
                 p = subprocess.run([self.binary, *args], capture_output=True, text=True,
                                    timeout=timeout, env=self._env())
         except subprocess.TimeoutExpired:
@@ -119,8 +122,8 @@ class ProtonCli:
 
     @property
     def busy(self) -> bool:
-        """True while a CLI process is running (e.g. a long upload)."""
-        return self._cli_lock.locked()
+        """True while a short CLI call (list/info/create-folder) is running."""
+        return self._meta_lock.locked()
 
     def session_status_cached(self, max_age: float = 30.0) -> CliResult | None:
         """For the web page. Never waits: the page must stay responsive during a long upload.
@@ -173,9 +176,14 @@ class ProtonCli:
         )
 
     def _run_watched(self, args: list[str], timeout: float) -> CliResult:
-        """Like _run, but kills the process if it makes no progress for `stall_s` (exit code 125)."""
+        """Like _run, but kills the process if it makes no progress for `stall_s` (exit code 125).
+
+        The activity signal includes the network namespace's byte counters, which are shared by all
+        uploads in the container. With several uploads running, one hung process is therefore only
+        noticed once the others go quiet; the job timeout is the backstop.
+        """
         cmd = " ".join(args[:2])
-        with self._cli_lock, tempfile.TemporaryFile("w+") as out:
+        with self._upload_slots, tempfile.TemporaryFile("w+") as out:
             try:
                 proc = subprocess.Popen([self.binary, *args], stdout=out, stderr=subprocess.STDOUT,
                                         text=True, env=self._env())

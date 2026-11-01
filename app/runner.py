@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import urllib.parse
 import urllib.request
@@ -76,6 +77,8 @@ class Runner:
         self._lock = threading.Lock()  # one job at a time, replaces flock
         self.busy_job: int | None = None
         self.progress: dict | None = None  # live view for the web page while a job runs
+        self._stored: dict[int, int] = {}
+        self._err_lock = threading.Lock()
 
     def run_job(self, job_id: int, dry_run: bool = False) -> str:
         job = self.db.job(job_id)
@@ -93,13 +96,12 @@ class Runner:
     def _error(self, job, run_id: int, place: str, message: str) -> None:
         """Log every failure; store the first MAX_STORED_ERRORS per run for the web page."""
         log.error("job=%s run=%d error place=%r %s", job["name"], run_id, place, message)
-        self._stored = getattr(self, "_stored", {})
-        n = self._stored.get(run_id, 0)
+        with self._err_lock:
+            n = self._stored.get(run_id, 0)
+            self._stored[run_id] = n + 1 if n <= self.MAX_STORED_ERRORS else n
         if n < self.MAX_STORED_ERRORS:
-            self._stored[run_id] = n + 1
             self.db.add_error(run_id, place, message)
         elif n == self.MAX_STORED_ERRORS:
-            self._stored[run_id] = n + 1
             self.db.add_error(run_id, "limit", "further errors not stored; see the container log")
 
     def _finish(self, job, run_id, status, summary, dry_run):
@@ -155,63 +157,88 @@ class Runner:
             return self._finish(job, run_id, "ok",
                                 f"dry run: {scanned} scanned, {skipped} unchanged, {pending} would upload", dry_run)
 
-        uploaded = failed = 0
-        done_bytes = 0
         errors: list[str] = []
-        plan = []  # (remote_dir, [batches]) so the total batch count is known up front
+        st = {"uploaded": 0, "failed": 0, "done_bytes": 0, "timed_out": 0}
+        st_lock = threading.Lock()
+        plan = []  # (remote_dir, items, batches) so the total batch count is known up front
         for rel_root, items in todo.items():
             remote_dir = str(PurePosixPath(job["dest"]) / rel_root) if rel_root else job["dest"]
             plan.append((remote_dir, items, make_batches(items)))
         total_batches = sum(len(b) for _, _, b in plan)
         total_bytes = sum(it[2] for items in todo.values() for it in items)
-        batch_no = 0
+        workers = self.cli.upload_workers
         self.progress = {"job": job["name"], "run": run_id, "files": pending, "bytes": total_bytes,
-                         "batches": total_batches, "batch": 0, "uploaded": 0, "failed": 0,
-                         "done_bytes": 0, "started": t0, "batch_started": t0}
-        log.info("job=%s run=%d plan: %d files, %s in %d batches (max %d files / %s each)",
-                 job["name"], run_id, pending, human(total_bytes), total_batches, BATCH_FILES, human(BATCH_BYTES))
-        try:
-            for remote_dir, items, batches in plan:
-                r = self.cli.ensure_folder(remote_dir)
-                if not r.ok:
-                    failed += len(items)
-                    batch_no += len(batches)
-                    errors.append(f"mkdir {remote_dir}: {r.out[:120]}")
-                    self._error(job, run_id, f"mkdir {remote_dir}", f"exit {r.code}: {one_line(r.out, 500)}; {len(items)} files skipped")
-                    continue
-                for chunk in batches:
-                    batch_no += 1
-                    if time.time() > deadline:
-                        return self._finish(job, run_id, "failed",
-                                            f"timeout after {int(time.time()-t0)}s; {uploaded} uploaded, {pending-uploaded} left",
-                                            dry_run)
-                    size = sum(c[2] for c in chunk)
-                    bt = time.time()
-                    self.progress.update(batch=batch_no, batch_started=bt, batch_files=len(chunk), batch_bytes=size)
+                         "batches": total_batches, "batch": 0, "active": 0, "workers": workers,
+                         "uploaded": 0, "failed": 0, "done_bytes": 0, "started": t0}
+        log.info("job=%s run=%d plan: %d files, %s in %d batches (max %d files / %s each), %d parallel uploads",
+                 job["name"], run_id, pending, human(total_bytes), total_batches, BATCH_FILES,
+                 human(BATCH_BYTES), workers)
+
+        def work(chunk, remote_dir, batch_no):
+            if time.time() > deadline:
+                with st_lock:
+                    st["timed_out"] += len(chunk)
+                return
+            size = sum(c[2] for c in chunk)
+            bt = time.time()
+            with st_lock:
+                self.progress["active"] += 1
+            try:
+                r = self.cli.upload([c[0] for c in chunk], remote_dir, max(30.0, deadline - time.time()))
+                tries = 0
+                while not r.ok and r.code == 125 and tries < STALL_RETRIES:
+                    tries += 1
+                    log.warning("job=%s run=%d batch %d/%d stalled; retrying (%d/%d)",
+                                job["name"], run_id, batch_no, total_batches, tries, STALL_RETRIES)
                     r = self.cli.upload([c[0] for c in chunk], remote_dir, max(30.0, deadline - time.time()))
-                    tries = 0
-                    while not r.ok and r.code == 125 and tries < STALL_RETRIES:
-                        tries += 1
-                        log.warning("job=%s run=%d batch %d/%d stalled; retrying (%d/%d)",
-                                    job["name"], run_id, batch_no, total_batches, tries, STALL_RETRIES)
-                        r = self.cli.upload([c[0] for c in chunk], remote_dir, max(30.0, deadline - time.time()))
-                    secs = max(time.time() - bt, 0.001)
-                    if r.ok:
-                        self.db.record_files(job["id"], [(c[1], c[2], c[3]) for c in chunk])
-                        uploaded += len(chunk)
-                        done_bytes += size
-                        log.info("job=%s run=%d batch %d/%d done: %d files, %s in %ds (%s/s); total %d/%d files, %s/%s",
-                                 job["name"], run_id, batch_no, total_batches, len(chunk), human(size), int(secs),
-                                 human(size / secs), uploaded, pending, human(done_bytes), human(total_bytes))
-                    else:
-                        failed += len(chunk)
-                        errors.append(f"upload {remote_dir}: {r.out[:120]}")
-                        names = ", ".join(c[1] for c in chunk[:3]) + (f" (+{len(chunk)-3} more)" if len(chunk) > 3 else "")
-                        self._error(job, run_id, f"upload {remote_dir}",
-                                    f"exit {r.code}: {one_line(r.out, 500)}; batch {batch_no}/{total_batches} of {len(chunk)} files, {human(size)}: {names}")
-                    self.progress.update(uploaded=uploaded, failed=failed, done_bytes=done_bytes)
+            finally:
+                with st_lock:
+                    self.progress["active"] -= 1
+            secs = max(time.time() - bt, 0.001)
+            if r.ok:
+                self.db.record_files(job["id"], [(c[1], c[2], c[3]) for c in chunk])
+                with st_lock:
+                    st["uploaded"] += len(chunk)
+                    st["done_bytes"] += size
+                    self.progress.update(batch=self.progress["batch"] + 1, uploaded=st["uploaded"],
+                                         done_bytes=st["done_bytes"])
+                    snap = dict(st)
+                log.info("job=%s run=%d batch %d/%d done: %d files, %s in %ds (%s/s); total %d/%d files, %s/%s",
+                         job["name"], run_id, batch_no, total_batches, len(chunk), human(size), int(secs),
+                         human(size / secs), snap["uploaded"], pending, human(snap["done_bytes"]), human(total_bytes))
+            else:
+                names = ", ".join(c[1] for c in chunk[:3]) + (f" (+{len(chunk)-3} more)" if len(chunk) > 3 else "")
+                errors.append(f"upload {remote_dir}: {r.out[:120]}")
+                with st_lock:
+                    st["failed"] += len(chunk)
+                    self.progress.update(batch=self.progress["batch"] + 1, failed=st["failed"])
+                self._error(job, run_id, f"upload {remote_dir}",
+                            f"exit {r.code}: {one_line(r.out, 500)}; batch {batch_no}/{total_batches} of {len(chunk)} files, {human(size)}: {names}")
+
+        try:
+            batch_no = 0
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="upload") as pool:
+                for remote_dir, items, batches in plan:
+                    # Folders are created here, one at a time, so parallel uploads never race on mkdir.
+                    r = self.cli.ensure_folder(remote_dir)
+                    if not r.ok:
+                        batch_no += len(batches)
+                        errors.append(f"mkdir {remote_dir}: {r.out[:120]}")
+                        with st_lock:
+                            st["failed"] += len(items)
+                            self.progress.update(batch=self.progress["batch"] + len(batches), failed=st["failed"])
+                        self._error(job, run_id, f"mkdir {remote_dir}", f"exit {r.code}: {one_line(r.out, 500)}; {len(items)} files skipped")
+                        continue
+                    for chunk in batches:
+                        batch_no += 1
+                        pool.submit(work, chunk, remote_dir, batch_no)
         finally:
             self.progress = None
+        uploaded, failed = st["uploaded"], st["failed"]
+        if st["timed_out"]:
+            return self._finish(job, run_id, "failed",
+                                f"timeout after {int(time.time()-t0)}s; {uploaded} uploaded, {pending-uploaded} left",
+                                dry_run)
 
         dur = int(time.time() - t0)
         summary = f"{scanned} scanned, {skipped} unchanged, {uploaded} uploaded, {failed} failed, {dur}s"

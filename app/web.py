@@ -71,9 +71,8 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
             left = max(pr["bytes"] - pr["done_bytes"], 0)
             eta = f", about {int(left / rate / 60)} min left" if rate > 0 and pr["done_bytes"] else ""
             running = (f"<p class=running><b>Running: {esc(pr['job'])}</b> (run <a href=runs/{pr['run']}>{pr['run']}</a>) &mdash; "
-                       f"batch {pr['batch']}/{pr['batches']} "
-                       f"({pr.get('batch_files', 0)} files, {human(pr.get('batch_bytes', 0))}, "
-                       f"{int(now - pr['batch_started'])}s in); "
+                       f"{pr['batch']}/{pr['batches']} batches done, {pr.get('active', 0)} uploading "
+                       f"(up to {pr.get('workers', 1)} at once); "
                        f"{pr['uploaded']}/{pr['files']} files, {human(pr['done_bytes'])} of {human(pr['bytes'])} uploaded"
                        f"{', ' + str(pr['failed']) + ' failed' if pr['failed'] else ''}; "
                        f"{int(now - pr['started'])}s elapsed{eta}. Reload to refresh.</p>")

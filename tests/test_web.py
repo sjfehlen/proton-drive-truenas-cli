@@ -79,23 +79,23 @@ def test_page_does_not_block_while_cli_is_busy(env, monkeypatch):
     import time as _t
     c, db, src = make(env, monkeypatch)
     cli = env[1]
-    assert cli._cli_lock.acquire(timeout=1)  # simulate a long-running upload holding the CLI
+    assert cli._meta_lock.acquire(timeout=1)  # simulate a short CLI call holding the lock
     try:
         t0 = _t.time()
         r = c.get("/", auth=("admin", "pw"))
         assert r.status_code == 200 and _t.time() - t0 < 5
         assert "unknown" in r.text
     finally:
-        cli._cli_lock.release()
+        cli._meta_lock.release()
 
 
 def test_page_shows_live_progress(env, monkeypatch):
     c, db, src = make(env, monkeypatch)
     runner = env[2]
     runner.progress = {"job": "big", "run": 7, "files": 100, "bytes": 10 * 1024**3, "batches": 20, "batch": 3,
-                       "batch_files": 5, "batch_bytes": 500 * 1024**2, "uploaded": 10, "failed": 0,
+                       "active": 2, "workers": 2, "uploaded": 10, "failed": 0,
                        "done_bytes": 1024**3, "started": time.time() - 120, "batch_started": time.time() - 30}
     page = c.get("/", auth=("admin", "pw")).text
-    assert "Running: big" in page and "batch 3/20" in page and "10/100 files" in page
+    assert "Running: big" in page and "3/20 batches done, 2 uploading" in page and "10/100 files" in page
     runner.progress = None
     assert "Running:" not in c.get("/", auth=("admin", "pw")).text
