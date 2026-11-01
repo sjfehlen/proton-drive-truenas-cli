@@ -1,0 +1,24 @@
+# Example only. Adjust the host paths, port and image before use. Check the port against your port registry.
+# Secrets (UI_PASSWORD, Kuma push URLs) belong in the stack's .env or the UI, never in this file.
+services:
+  proton-backup:
+    build:
+      context: .
+      args:
+        PROTON_CLI_URL: ${PROTON_CLI_URL}
+        PROTON_CLI_SHA256: ${PROTON_CLI_SHA256}
+    container_name: proton-backup
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-30400}:8080"
+    environment:
+      UI_USER: ${UI_USER:-admin}
+      UI_PASSWORD: ${UI_PASSWORD:?set UI_PASSWORD}
+      STALE_DAYS: "3"
+      # STALE_PING_URL: optional Uptime Kuma push URL, pinged "down" if no job has succeeded in STALE_DAYS
+    volumes:
+      # State DB and the Proton session file (credential): keep on a host-path dataset, mode 700.
+      - /mnt/Storage/Application/ProtonBackup:/data
+      # Sources are read-only.
+      - /mnt/Storage/Application/Immich:/sources/immich:ro
+      - /mnt/Storage/GeneralFiles:/sources/generalfiles:ro
