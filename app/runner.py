@@ -70,6 +70,7 @@ class Runner:
         t0 = time.time()
         deadline = t0 + job["timeout_s"]
         run_id = self.db.start_run(job["id"], dry_run)
+        self.cli.reset_cache()
 
         s = self.cli.session_ok()
         if not s.ok:

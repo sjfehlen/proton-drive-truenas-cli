@@ -1,8 +1,7 @@
 """Adapter around the official `proton-drive` CLI.
 
 Every CLI invocation lives here so a change in the CLI only touches this file.
-Commands marked UNVERIFIED have not been tested against a real CLI yet; see
-docs/cli-notes.md.
+Checked against proton-drive CLI 0.6.0; see docs/cli-notes.md.
 """
 from __future__ import annotations
 
@@ -27,9 +26,16 @@ class ProtonCli:
                  file_strategy: str | None = None, folder_strategy: str | None = None):
         self.binary = binary or os.environ.get("PROTON_CLI_BIN", "proton-drive")
         self.session_dir = session_dir or os.environ.get("SESSION_DIR", "/data/session")
-        # create-new-revision needs CLI >= 0.8.0. UNVERIFIED defaults.
-        self.file_strategy = file_strategy or os.environ.get("FILE_CONFLICT_STRATEGY", "create-new-revision")
+        # Verified against CLI 0.6.0: values are merge, keep-both, replace, skip.
+        # Newer CLIs (>= 0.8.0) reportedly add create-new-revision for files.
+        self.file_strategy = file_strategy or os.environ.get("FILE_CONFLICT_STRATEGY", "replace")
         self.folder_strategy = folder_strategy or os.environ.get("FOLDER_CONFLICT_STRATEGY", "merge")
+        # Remote folders already confirmed this run. Each CLI call costs 2-4 s of network round trip,
+        # so don't re-probe shared parents. Cleared at the start of every run.
+        self.known_folders: set[str] = set()
+
+    def reset_cache(self) -> None:
+        self.known_folders.clear()
 
     def _env(self) -> dict[str, str]:
         env = dict(os.environ)
@@ -50,26 +56,28 @@ class ProtonCli:
 
     def session_ok(self) -> CliResult:
         """A cheap authenticated call. A dead session exits 1 with the reason on stdout."""
-        return self._run(["filesystem", "list", "/my-files", "--json"], 60)
+        return self._run(["filesystem", "list", "/my-files"], 60)
 
     def folder_exists(self, path: str) -> bool:
-        return self._run(["filesystem", "info", path, "--json"], 60).ok  # UNVERIFIED
+        return self._run(["filesystem", "info", path], 60).ok
 
-    def create_folder(self, path: str) -> CliResult:
-        return self._run(["filesystem", "create-folder", path], 60)  # UNVERIFIED; fails if it exists
+    def create_folder(self, parent: str, name: str) -> CliResult:
+        # CLI 0.6.0 syntax: create-folder parentPath name
+        return self._run(["filesystem", "create-folder", parent, name], 60)
 
     def ensure_folder(self, path: str) -> CliResult:
         """Create each missing component of a remote path."""
         parts = [p for p in path.strip("/").split("/") if p]
-        cur = ""
-        for part in parts[:1]:  # `/my-files` always exists
-            cur = f"/{part}"
+        cur = f"/{parts[0]}" if parts else ""  # `/my-files` always exists
         for part in parts[1:]:
-            cur += f"/{part}"
-            if not self.folder_exists(cur):
-                r = self.create_folder(cur)
-                if not r.ok:
-                    return r
+            nxt = f"{cur}/{part}"
+            if nxt not in self.known_folders:
+                if not self.folder_exists(nxt):
+                    r = self.create_folder(cur, part)
+                    if not r.ok:
+                        return r
+                self.known_folders.add(nxt)
+            cur = nxt
         return CliResult(True, 0, "")
 
     def upload(self, local_files: list[str], remote_dir: str, timeout: float) -> CliResult:

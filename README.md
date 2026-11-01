@@ -2,7 +2,7 @@
 
 A small container that runs scheduled one-way backups to Proton Drive using Proton's **official `proton-drive` CLI**, with a web page to log in and manage jobs. Built for a TrueNAS box where rclone's unofficial Proton backend and a stored TOTP secret kept breaking silently.
 
-> **Status: v0, untested against the real CLI.** The scheduler, runner, index, Kuma pings and web UI are covered by tests using a fake CLI. The CLI calls themselves are unverified — see [docs/cli-notes.md](docs/cli-notes.md).
+> **Status: v0.** Login, session persistence, dry run and a real upload are verified against CLI 0.6.0. Resume after a crash, session lifetime and throughput at scale are not yet tested. See [docs/cli-notes.md](docs/cli-notes.md).
 
 ## What it does
 
@@ -18,7 +18,7 @@ Not in v0: remote deletes (copy only), restore UI, multiple accounts.
 
 ## Run it
 
-1. Download the Linux `proton-drive` CLI from Proton ([support page](https://proton.me/support/drive-cli)), host it where you control it, and note its SHA-256. Use version 0.8.0 or later.
+1. Download the Linux `proton-drive` CLI from Proton ([support page](https://proton.me/support/drive-cli)), host it where you control it, and note its SHA-256. Developed against CLI 0.6.0; pin whichever version you test.
 2. Copy [compose.example.yaml](compose.example.yaml), set `PROTON_CLI_URL`, `PROTON_CLI_SHA256`, `UI_PASSWORD`, and your host paths.
 3. `docker compose up -d --build`, open the page, click **Log in to Proton**, open the URL it shows, finish signing in.
 4. Add a job and run it with **Dry run** first.
@@ -33,7 +33,7 @@ The UI refuses to start without `UI_PASSWORD` (set `ALLOW_NO_AUTH=1` for local t
 | `DATA_DIR` | `/data` | State DB and Proton session. The session file is a credential: keep it mode 700, off any shared backup |
 | `PORT` | `8080` | Listen port inside the container |
 | `STALE_DAYS`, `STALE_PING_URL` | `3`, unset | Optional "no recent success" alert |
-| `FILE_CONFLICT_STRATEGY`, `FOLDER_CONFLICT_STRATEGY` | `create-new-revision`, `merge` | Passed to `filesystem upload` (unverified values) |
+| `FILE_CONFLICT_STRATEGY`, `FOLDER_CONFLICT_STRATEGY` | `replace`, `merge` | Passed to `filesystem upload` (values valid in CLI 0.6.0: merge, keep-both, replace, skip) |
 | `PROTON_CLI_BIN` | `proton-drive` | CLI path |
 
 ## Develop

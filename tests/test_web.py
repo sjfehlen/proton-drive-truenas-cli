@@ -38,3 +38,24 @@ def test_add_job_validates_and_page_escapes(env, monkeypatch):
     page = c.get("/", auth=a).text
     assert "<script>x</script>" not in page and "&lt;script&gt;" in page
     assert "SECRET" not in page  # the push URL is never rendered
+
+
+def test_links_and_redirects_are_relative(env, monkeypatch):
+    """Must work behind a path prefix such as code-server's /proxy/8765/."""
+    c, db, src = make(env, monkeypatch)
+    a = ("admin", "pw")
+    page = c.get("/", auth=a).text
+    assert 'action="/' not in page and "action=/" not in page
+    for path, expect in [("/login", "./"), ("/login/cancel", "../")]:
+        assert c.post(path, auth=a, follow_redirects=False).headers["location"] == expect
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *")
+    for act in ("toggle", "delete"):
+        assert c.post(f"/jobs/{jid}/{act}", auth=a, follow_redirects=False).headers["location"] == "../../"
+
+
+def test_duplicate_job_name_is_a_409_not_a_500(env, monkeypatch):
+    c, db, src = make(env, monkeypatch)
+    a = ("admin", "pw")
+    form = {"name": "dup", "source": str(src), "dest": "/my-files/B", "cron": "0 4 * * *"}
+    assert c.post("/jobs", auth=a, data=form, follow_redirects=False).status_code == 303
+    assert c.post("/jobs", auth=a, data=form, follow_redirects=False).status_code == 409

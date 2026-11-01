@@ -3,7 +3,7 @@ FROM python:3.12-slim
 # The official proton-drive CLI is not baked in from a guessed URL. Download the Linux build from
 # https://proton.me/drive/cli (or the page it links to), host it somewhere you control, and pass it:
 #   docker build --build-arg PROTON_CLI_URL=https://.../proton-drive --build-arg PROTON_CLI_SHA256=<sum> .
-# Pin the version: CLI >= 0.8.0 is required for create-new-revision.
+# Pin the version. Tested against CLI 0.6.0.
 ARG PROTON_CLI_URL
 ARG PROTON_CLI_SHA256
 ARG UID=1000

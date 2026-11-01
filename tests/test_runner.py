@@ -55,6 +55,9 @@ def test_upload_then_skip_unchanged(env):
     ups = uploads(log)
     assert len(ups) == 2  # root dir and a/
     flat = " ".join(" ".join(u) for u in ups)
+    mk = [c for c in calls(log) if c[:2] == ["filesystem", "create-folder"]]
+    assert ["filesystem", "create-folder", "/my-files", "B"] in mk
+    assert ["filesystem", "create-folder", "/my-files/B", "a"] in mk
     assert "x.bin" not in flat and "--file-conflict-strategy" in flat and "--folder-conflict-strategy" in flat
     assert runner.run_job(jid) == "ok"
     assert len(uploads(log)) == 2  # nothing new uploaded the second time
@@ -121,3 +124,13 @@ def test_login_flow_captures_url(env):
             break
         time.sleep(0.1)
     assert flow.url == "https://account.proton.me/auth/example"
+
+
+def test_shared_parent_folders_probed_once_per_run(env):
+    db, cli, runner, src, log = env
+    (src / "a" / "b").mkdir()
+    (src / "a" / "b" / "deep.txt").write_text("d")
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *", ["skip/**"])
+    runner.run_job(jid)
+    probes = [c[2] for c in calls(log) if c[:2] == ["filesystem", "info"]]
+    assert len(probes) == len(set(probes))  # no path probed twice
