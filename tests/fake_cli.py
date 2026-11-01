@@ -18,6 +18,15 @@ if os.environ.get("FAKE_DEAD") == "1":
     sys.exit(1)
 if args[:2] == ["filesystem", "info"]:
     sys.exit(0 if args[2] in os.environ.get("FAKE_EXISTING", "/my-files").split(",") else 1)
+if args[:2] == ["filesystem", "upload"]:
+    import time
+    hang_once = os.environ.get("FAKE_HANG_ONCE")
+    if os.environ.get("FAKE_HANG") == "1" or (hang_once and not os.path.exists(hang_once)):
+        if hang_once:
+            open(hang_once, "w").close()
+        time.sleep(600)  # a silent hang
+    if os.environ.get("FAKE_SLOW"):
+        time.sleep(float(os.environ["FAKE_SLOW"]))
 if args[:2] == ["filesystem", "upload"] and os.environ.get("FAKE_UPLOAD_FAIL") == "1":
     print("boom")
     sys.exit(1)

@@ -10,6 +10,7 @@ A small container that runs scheduled one-way backups to Proton Drive using Prot
 - **Jobs.** Source folder (read-only mount) → Proton folder, cron schedule, exclude patterns, optional Uptime Kuma push URL.
 - **Incremental.** Keeps a SQLite index of uploaded files (path, size, mtime) and uploads only new or changed ones. A batch is indexed only after it uploads successfully.
 - **One job at a time**, with a per-job timeout (default 6 hours). A job that overruns is reported failed.
+- **Small batches, stall watchdog.** Uploads go in batches capped by file count and size, so progress is visible and a failure is cheap. A CLI that moves no data for `STALL_SECONDS` is killed and the batch retried once. The page shows the running batch, bytes uploaded and time elapsed.
 - **Fails loudly.** Pings Uptime Kuma `up` on success and `down` with a short reason on failure — including "session expired, log in" before any work is attempted. An optional staleness ping fires if no job has succeeded in `STALE_DAYS`.
 - **Logs to stdout**, one summary line per run, so a Docker log collector (Promtail/Loki) picks it up.
 - **Dry run** per job: shows what would upload without touching Proton.
@@ -35,6 +36,8 @@ The UI refuses to start without `UI_PASSWORD` (set `ALLOW_NO_AUTH=1` for local t
 | `STALE_DAYS`, `STALE_PING_URL` | `3`, unset | Optional "no recent success" alert |
 | `FILE_CONFLICT_STRATEGY`, `FOLDER_CONFLICT_STRATEGY` | `replace`, `merge` | Passed to `filesystem upload` (values valid in CLI 0.6.0: merge, keep-both, replace, skip) |
 | `PROTON_CLI_BIN` | `proton-drive` | CLI path |
+| `BATCH_FILES`, `BATCH_MB` | `25`, `500` | Max files and megabytes per CLI upload call. A failure or stall costs at most one batch |
+| `STALL_SECONDS` | `600` | An upload that moves no data (disk or network) for this long is killed and the batch retried once. Measured pauses on CLI 0.6.0 reach about 4 minutes, so don't set this low |
 
 ## Develop
 

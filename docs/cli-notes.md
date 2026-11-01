@@ -23,10 +23,14 @@ a dry run and a real upload.
 - Each CLI call costs about 2-4 s of network round trip, regardless of file size. A 10-file batch uploaded in about 6 s.
 - A three-file, one-subfolder job took 37 s end to end, mostly folder probing. The runner now caches confirmed folders per run, so shared parents are probed once.
 
+- Sustained upload of large files ran at about 3.5 MiB/s (29 Mbps) over a 10 minute window.
+- **Pauses are intermittent.** The same 31 MB file uploaded in about 30 s with steady traffic on one attempt, and on another attempt sat with almost no traffic for over two minutes. In the 100-file run the CLI went quiet for roughly four minutes and then resumed on its own. The stall watchdog default (600 s) is set from this.
+- A CLI process reports activity through `/proc/<pid>/io` (bytes read) and its network namespace counters; the watchdog uses both and needs Linux.
+
 ## Still to test
 
 1. Recreate the container (not just the process) and confirm the session survives in the mounted volume.
-2. Kill the process mid-run, restart, and confirm the next run resumes (the index only records batches that finished).
+2. Kill the process mid-run (an interrupted run was observed to leave the batch unindexed, so it re-uploads), restart, and confirm the next run resumes (the index only records batches that finished).
 3. ~~Change a file and confirm only that file uploads~~ — done: one file uploaded in 11 s.
 4. Compare speed against rclone on the Immich set, and check whether the CLI can see the files rclone already uploaded.
 5. Session lifetime: leave it for several days and check that jobs still authenticate.

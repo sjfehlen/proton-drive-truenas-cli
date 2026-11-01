@@ -187,3 +187,91 @@ def test_error_storage_is_capped(env):
     for i in range(runner.MAX_STORED_ERRORS + 50):
         runner._error(job, rid, "x", f"e{i}")
     assert len(db.run_errors(rid)) == runner.MAX_STORED_ERRORS + 1  # + the "limit" marker
+
+
+# ---- batching, stall watchdog, progress ----
+
+def _item(size, name="f"):
+    return (f"/x/{name}", name, size, 0.0)
+
+
+def test_make_batches_caps_files_and_bytes():
+    from app.runner import make_batches
+    assert [len(b) for b in make_batches([_item(1)] * 60, max_files=25, max_bytes=10**9)] == [25, 25, 10]
+    assert [len(b) for b in make_batches([_item(400)] * 5, max_files=25, max_bytes=1000)] == [2, 2, 1]
+    # a file larger than the cap goes alone
+    assert [len(b) for b in make_batches([_item(1), _item(5000), _item(1)], max_files=25, max_bytes=1000)] == [1, 1, 1]
+    assert make_batches([]) == []
+
+
+def test_runner_splits_uploads_into_batches(env, monkeypatch):
+    db, cli, runner, src, log = env
+    monkeypatch.setattr("app.runner.BATCH_FILES", 25)
+    for i in range(60):
+        (src / f"bulk{i}.txt").write_text("x")
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *", ["skip/**", "a/**"])
+    assert runner.run_job(jid) == "ok"
+    sizes = sorted(len([a for a in u if a.startswith("/")]) - 1 for u in uploads(log))
+    assert max(sizes) <= 25 and len(uploads(log)) >= 3
+
+
+def _fast_watchdog(cli, stall=1.0):
+    cli.stall_s, cli.poll_s = stall, 0.2
+    cli.activity_fn = lambda pid: 0  # never any movement
+
+
+def test_watchdog_kills_a_silent_hang(env, monkeypatch):
+    db, cli, runner, src, log = env
+    monkeypatch.setenv("FAKE_HANG", "1")
+    _fast_watchdog(cli)
+    t0 = time.time()
+    r = cli.upload([str(src / "top.txt")], "/my-files/B", timeout=60)
+    assert not r.ok and r.code == 125 and "stalled" in r.out
+    assert time.time() - t0 < 15
+
+
+def test_watchdog_leaves_an_active_upload_alone(env, monkeypatch):
+    db, cli, runner, src, log = env
+    monkeypatch.setenv("FAKE_SLOW", "2.5")
+    cli.stall_s, cli.poll_s = 1.0, 0.2
+    n = [0]
+
+    def moving(pid):
+        n[0] += 10**6
+        return n[0]  # always moving
+    cli.activity_fn = moving
+    assert cli.upload([str(src / "top.txt")], "/my-files/B", timeout=60).ok
+
+
+def test_watchdog_falls_back_when_proc_is_unavailable(env, monkeypatch):
+    db, cli, runner, src, log = env
+    monkeypatch.setenv("FAKE_SLOW", "1")
+
+    def no_proc(pid):
+        raise OSError("no /proc")
+    cli.stall_s, cli.poll_s, cli.activity_fn = 0.1, 0.2, no_proc
+    assert cli.upload([str(src / "top.txt")], "/my-files/B", timeout=60).ok  # not killed
+
+
+def test_stalled_batch_is_retried_once_and_succeeds(env, monkeypatch, tmp_path, caplog):
+    import logging
+    caplog.set_level(logging.INFO)
+    db, cli, runner, src, log = env
+    monkeypatch.setenv("FAKE_HANG_ONCE", str(tmp_path / "hung"))
+    _fast_watchdog(cli)
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *", ["skip/**", "a/**"])
+    assert runner.run_job(jid) == "ok"
+    assert len(uploads(log)) == 2  # hung attempt + retry
+    assert "stalled; retrying" in caplog.text and "exit=125" in caplog.text
+    assert runner.progress is None  # cleared when the run ends
+
+
+def test_persistent_stall_fails_the_batch_with_a_clear_error(env, monkeypatch):
+    db, cli, runner, src, log = env
+    monkeypatch.setenv("FAKE_HANG", "1")
+    _fast_watchdog(cli, stall=0.6)
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *", ["skip/**", "a/**"])
+    assert runner.run_job(jid) == "failed"
+    errs = db.run_errors(db.last_run(jid)["id"])
+    assert errs and "stalled" in errs[0]["message"] and "exit 125" in errs[0]["message"]
+    assert db.indexed(jid) == {}

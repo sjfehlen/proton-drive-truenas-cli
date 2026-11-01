@@ -14,7 +14,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from .cli import LoginFlow, ProtonCli
 from .db import Db
-from .runner import Runner
+from .runner import Runner, human
 
 STYLE = """<style>body{font:15px system-ui;margin:2rem auto;max-width:960px;padding:0 1rem}
 table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ccc;padding:.4rem;text-align:left;vertical-align:top}
@@ -63,6 +63,20 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
             lg = ""
             if login.finished_ok is False:
                 lg = f"<p class=failed>Last login attempt failed: {esc(' | '.join(login.lines[-3:]))}</p>"
+        pr = runner.progress
+        running = ""
+        if pr:
+            now = time.time()
+            rate = pr["done_bytes"] / max(now - pr["started"], 1)
+            left = max(pr["bytes"] - pr["done_bytes"], 0)
+            eta = f", about {int(left / rate / 60)} min left" if rate > 0 and pr["done_bytes"] else ""
+            running = (f"<p class=running><b>Running: {esc(pr['job'])}</b> (run <a href=runs/{pr['run']}>{pr['run']}</a>) &mdash; "
+                       f"batch {pr['batch']}/{pr['batches']} "
+                       f"({pr.get('batch_files', 0)} files, {human(pr.get('batch_bytes', 0))}, "
+                       f"{int(now - pr['batch_started'])}s in); "
+                       f"{pr['uploaded']}/{pr['files']} files, {human(pr['done_bytes'])} of {human(pr['bytes'])} uploaded"
+                       f"{', ' + str(pr['failed']) + ' failed' if pr['failed'] else ''}; "
+                       f"{int(now - pr['started'])}s elapsed{eta}. Reload to refresh.</p>")
         rows = ""
         for j in db.jobs():
             r = db.last_run(j["id"])
@@ -81,7 +95,7 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
                        for r in db.recent_runs())
         return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><title>Proton backups</title>{STYLE}
 <h1>Proton Drive backups</h1><p>Session: {state}
-<form class=inline method=post action=login><button>Log in to Proton</button></form></p>{lg}
+<form class=inline method=post action=login><button>Log in to Proton</button></form></p>{lg}{running}
 <h2>Jobs</h2><table><tr><th>Job</th><th>Schedule</th><th>Last run</th><th></th></tr>{rows}</table>
 <h3>Add job</h3><form method=post action=jobs>
 <input name=name placeholder=name required> <input name=source placeholder=/source/path required>

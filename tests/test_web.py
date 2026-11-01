@@ -1,3 +1,4 @@
+import time
 import pytest
 from fastapi.testclient import TestClient
 
@@ -86,3 +87,15 @@ def test_page_does_not_block_while_cli_is_busy(env, monkeypatch):
         assert "unknown" in r.text
     finally:
         cli._cli_lock.release()
+
+
+def test_page_shows_live_progress(env, monkeypatch):
+    c, db, src = make(env, monkeypatch)
+    runner = env[2]
+    runner.progress = {"job": "big", "run": 7, "files": 100, "bytes": 10 * 1024**3, "batches": 20, "batch": 3,
+                       "batch_files": 5, "batch_bytes": 500 * 1024**2, "uploaded": 10, "failed": 0,
+                       "done_bytes": 1024**3, "started": time.time() - 120, "batch_started": time.time() - 30}
+    page = c.get("/", auth=("admin", "pw")).text
+    assert "Running: big" in page and "batch 3/20" in page and "10/100 files" in page
+    runner.progress = None
+    assert "Running:" not in c.get("/", auth=("admin", "pw")).text

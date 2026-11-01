@@ -9,12 +9,39 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
 
 URL_RE = re.compile(r"https?://\S+")
 log = logging.getLogger("cli")
+
+
+MIN_ACTIVITY_BYTES = 64 * 1024  # movement below this over the stall window counts as "nothing happening"
+
+
+def proc_activity(pid: int) -> int:
+    """A counter that rises whenever the process reads files or its network namespace moves bytes.
+
+    Linux only. Raises OSError where /proc is unavailable (the watchdog then falls back to the
+    plain timeout). Network bytes come from the process's own netns, so inside the container this is
+    effectively the CLI's traffic. It is a coarse signal: unrelated traffic in a shared namespace can
+    only hide a stall, never fake one.
+    """
+    total = 0
+    with open(f"/proc/{pid}/io") as f:
+        for line in f:
+            if line.startswith(("rchar:", "wchar:")):
+                total += int(line.split()[1])
+    with open(f"/proc/{pid}/net/dev") as f:
+        for line in list(f)[2:]:
+            name, _, rest = line.partition(":")
+            if name.strip() == "lo":
+                continue
+            cols = rest.split()
+            total += int(cols[0]) + int(cols[8])  # rx bytes + tx bytes
+    return total
 
 
 def one_line(text: str, limit: int) -> str:
@@ -31,7 +58,8 @@ class CliResult:
 
 class ProtonCli:
     def __init__(self, binary: str | None = None, session_dir: str | None = None,
-                 file_strategy: str | None = None, folder_strategy: str | None = None):
+                 file_strategy: str | None = None, folder_strategy: str | None = None,
+                 stall_s: float | None = None, poll_s: float = 5.0, activity_fn=None):
         self.binary = binary or os.environ.get("PROTON_CLI_BIN", "proton-drive")
         self.session_dir = session_dir or os.environ.get("SESSION_DIR", "/data/session")
         # Verified against CLI 0.6.0: values are merge, keep-both, replace, skip.
@@ -41,6 +69,12 @@ class ProtonCli:
         # Remote folders already confirmed this run. Each CLI call costs 2-4 s of network round trip,
         # so don't re-probe shared parents. Cleared at the start of every run.
         self.known_folders: set[str] = set()
+        # An upload is killed if it moves no data for this long. Measured on CLI 0.6.0: the same upload
+        # sometimes finishes in 30 s and sometimes goes quiet for up to ~4 minutes and then resumes by
+        # itself (Proton side), so the default leaves a wide margin over that.
+        self.stall_s = stall_s if stall_s is not None else float(os.environ.get("STALL_SECONDS", "600"))
+        self.poll_s = poll_s
+        self.activity_fn = activity_fn or proc_activity
         # The CLI keeps lock files (events.lock) in its state dir, so overlapping invocations can
         # fail spuriously. Run one CLI process at a time.
         self._cli_lock = threading.Lock()
@@ -130,13 +164,68 @@ class ProtonCli:
 
     def upload(self, local_files: list[str], remote_dir: str, timeout: float) -> CliResult:
         # Strategies are mandatory: without them the CLI prompts and a service hangs.
-        return self._run(
+        return self._run_watched(
             ["filesystem", "upload",
              "--file-conflict-strategy", self.file_strategy,
              "--folder-conflict-strategy", self.folder_strategy,
              *local_files, remote_dir],
             timeout,
         )
+
+    def _run_watched(self, args: list[str], timeout: float) -> CliResult:
+        """Like _run, but kills the process if it makes no progress for `stall_s` (exit code 125)."""
+        cmd = " ".join(args[:2])
+        with self._cli_lock, tempfile.TemporaryFile("w+") as out:
+            try:
+                proc = subprocess.Popen([self.binary, *args], stdout=out, stderr=subprocess.STDOUT,
+                                        text=True, env=self._env())
+            except FileNotFoundError:
+                log.error("cli_failed cmd=%r exit=127 out='CLI not found: %s'", cmd, self.binary)
+                return CliResult(False, 127, f"CLI not found: {self.binary}")
+            start = last = time.time()
+            watch = True
+            try:
+                base = self.activity_fn(proc.pid)
+            except OSError:
+                watch, base = False, 0
+                log.warning("stall watchdog unavailable (no /proc); relying on the timeout only")
+            reason = ""
+            code = 0
+            while True:
+                try:
+                    proc.wait(timeout=self.poll_s)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                now = time.time()
+                if now - start > timeout:
+                    reason, code = f"timed out after {int(timeout)}s", 124
+                elif watch:
+                    try:
+                        a = self.activity_fn(proc.pid)
+                    except OSError:
+                        a = None  # process ended between the poll and the read
+                    if a is not None and a - base >= MIN_ACTIVITY_BYTES:
+                        base, last = a, now
+                    elif now - last > self.stall_s:
+                        reason, code = f"stalled: no data moved for {int(now - last)}s", 125
+                if reason:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    break
+            out.seek(0)
+            text = out.read().strip()
+            if reason:
+                log.warning("cli_failed cmd=%r exit=%d out=%r", cmd, code, reason)
+                return CliResult(False, code, f"{reason}; {one_line(text, 200)}" if text else reason)
+            res = CliResult(proc.returncode == 0, proc.returncode, text)
+            if not res.ok:
+                log.warning("cli_failed cmd=%r exit=%d out=%r", cmd, res.code, one_line(res.out, 400))
+            return res
 
 
 class LoginFlow:
