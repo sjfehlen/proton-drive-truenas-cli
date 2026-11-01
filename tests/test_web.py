@@ -19,14 +19,6 @@ def test_requires_auth(env, monkeypatch):
     assert c.get("/healthz").status_code == 200
 
 
-def test_refuses_to_start_without_password(env, monkeypatch):
-    db, cli, runner, src, log = env
-    monkeypatch.delenv("UI_PASSWORD", raising=False)
-    monkeypatch.delenv("ALLOW_NO_AUTH", raising=False)
-    with pytest.raises(RuntimeError):
-        create_app(db, cli, runner)
-
-
 def test_add_job_validates_and_page_escapes(env, monkeypatch):
     c, db, src = make(env, monkeypatch)
     a = ("admin", "pw")
@@ -152,3 +144,131 @@ def test_page_says_so_when_the_cli_binary_is_missing(env, monkeypatch):
     env[1].binary = "/nonexistent/proton-drive"
     page = c.get("/", auth=("admin", "pw")).text
     assert "Proton CLI not found" in page and "/nonexistent/proton-drive" in page
+
+
+
+# ---- first-run password setup ----
+
+def fresh(env, monkeypatch):
+    """An app with no UI_PASSWORD and an empty database: first-run setup mode."""
+    db, cli, runner, src, log = env
+    monkeypatch.delenv("UI_PASSWORD", raising=False)
+    monkeypatch.delenv("ALLOW_NO_AUTH", raising=False)
+    return TestClient(create_app(db, cli, runner)), db, cli, runner
+
+
+def test_first_run_redirects_everything_to_setup_with_relative_paths(env, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.WARNING)
+    c, db, cli, runner = fresh(env, monkeypatch)
+    assert "FIRST-RUN SETUP" in caplog.text and "Setup code" in caplog.text  # printed at startup
+    for path, loc in [("/", "setup"), ("/runs/3", "../setup"), ("/jobs/1/stop", "../../setup")]:
+        r = c.request("POST" if "stop" in path else "GET", path, follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == loc, path
+    assert c.get("/healthz").status_code == 200  # stays open for the container health check
+    assert c.get("/setup").status_code == 200
+
+
+def _code(caplog):
+    return caplog.text.split("Setup code (needed on that page): ")[1].split()[0]
+
+
+def test_setup_requires_the_code_and_a_good_password(env, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr("app.web.time.sleep", lambda s: None)
+    c, db, cli, runner = fresh(env, monkeypatch)
+    code = _code(caplog)
+    good = "correct horse battery"
+    assert c.post("/setup", data={"code": "wrong", "password": good, "confirm": good}).status_code == 400
+    assert db.get_setting("ui_password_hash") is None
+    assert c.post("/setup", data={"code": code, "password": "short", "confirm": "short"}).status_code == 400
+    assert c.post("/setup", data={"code": code, "password": good, "confirm": good + "x"}).status_code == 400
+    assert db.get_setting("ui_password_hash") is None  # nothing saved by any failed attempt
+
+
+def test_setup_saves_a_hash_then_basic_auth_works_and_setup_closes(env, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.WARNING)
+    c, db, cli, runner = fresh(env, monkeypatch)
+    code, pw = _code(caplog), "correct horse battery"
+    r = c.post("/setup", data={"code": code, "password": pw, "confirm": pw}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "./"
+    stored = db.get_setting("ui_password_hash")
+    assert stored.startswith("scrypt$") and pw not in stored  # hashed, never plain
+    assert c.get("/", auth=("admin", pw)).status_code == 200
+    monkeypatch.setattr("app.web.time.sleep", lambda s: None)
+    assert c.get("/", auth=("admin", "wrong password")).status_code == 401
+    assert c.get("/", auth=("someone", pw)).status_code == 401
+    assert c.get("/").status_code == 401
+    assert c.get("/setup", follow_redirects=False).status_code == 303  # setup is closed for good
+    assert c.post("/setup", data={"code": code, "password": "another long one", "confirm": "another long one"},
+                  follow_redirects=False).status_code == 303
+    assert db.get_setting("ui_password_hash") == stored  # a late setup post cannot overwrite it
+
+
+def test_password_survives_an_app_restart(env, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.WARNING)
+    c, db, cli, runner = fresh(env, monkeypatch)
+    pw = "correct horse battery"
+    c.post("/setup", data={"code": _code(caplog), "password": pw, "confirm": pw})
+    again = TestClient(create_app(db, cli, runner))  # a new process reading the same database
+    assert again.get("/", auth=("admin", pw)).status_code == 200
+
+
+def test_change_password(env, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr("app.web.time.sleep", lambda s: None)
+    c, db, cli, runner = fresh(env, monkeypatch)
+    old, new = "correct horse battery", "a brand new passphrase"
+    c.post("/setup", data={"code": _code(caplog), "password": old, "confirm": old})
+    assert "Change UI password" in c.get("/", auth=("admin", old)).text
+    bad = c.post("/settings/password", auth=("admin", old), data={"current": "nope", "new": new, "confirm": new})
+    assert bad.status_code == 400
+    short = c.post("/settings/password", auth=("admin", old), data={"current": old, "new": "short", "confirm": "short"})
+    assert short.status_code == 400
+    ok = c.post("/settings/password", auth=("admin", old), data={"current": old, "new": new, "confirm": new},
+                follow_redirects=False)
+    assert ok.status_code == 303 and ok.headers["location"] == "../"
+    assert c.get("/", auth=("admin", new)).status_code == 200
+    assert c.get("/", auth=("admin", old)).status_code == 401
+
+
+def test_env_password_wins_and_cannot_be_changed_in_the_ui(env, monkeypatch):
+    c, db, src = make(env, monkeypatch)  # UI_PASSWORD=pw
+    page = c.get("/", auth=("admin", "pw")).text
+    assert "UI_PASSWORD" in page and "Change UI password" not in page
+    assert c.post("/settings/password", auth=("admin", "pw"),
+                  data={"current": "pw", "new": "x" * 12, "confirm": "x" * 12}).status_code == 400
+    assert db.get_setting("ui_password_hash") is None
+
+
+def test_password_hashing_is_salted_and_verifiable():
+    from app.auth import hash_password, verify_password
+    a, b = hash_password("same password!"), hash_password("same password!")
+    assert a != b  # random salt
+    assert verify_password("same password!", a) and not verify_password("other password!", a)
+    assert not verify_password("x", "garbage") and not verify_password("x", "")
+
+
+def test_reset_command_reopens_first_run_setup(env, monkeypatch, caplog, tmp_path):
+    import logging
+    caplog.set_level(logging.WARNING)
+    c, db, cli, runner = fresh(env, monkeypatch)
+    pw = "correct horse battery"
+    c.post("/setup", data={"code": _code(caplog), "password": pw, "confirm": pw})
+    assert c.get("/", auth=("admin", pw)).status_code == 200
+    import app.reset_password as rp
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))  # reset_password opens DATA_DIR/state.db
+    monkeypatch.setattr(rp, "Db", lambda path: db)
+    caplog.clear()
+    assert rp.main() == 0
+    assert db.get_setting("ui_password_hash") is None
+    assert c.get("/", follow_redirects=False).status_code == 303  # back to setup
+    assert c.get("/setup").status_code == 200
+    assert "FIRST-RUN SETUP" in caplog.text  # a fresh code was logged when the page was opened
+    pw2 = "second correct horse"
+    r = c.post("/setup", data={"code": _code(caplog), "password": pw2, "confirm": pw2}, follow_redirects=False)
+    assert r.status_code == 303 and c.get("/", auth=("admin", pw2)).status_code == 200

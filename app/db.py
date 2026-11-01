@@ -57,6 +57,10 @@ class Db:
         with self.tx() as c:
             c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, str(value)))
 
+    def delete_setting(self, key: str) -> None:
+        with self.tx() as c:
+            c.execute("DELETE FROM settings WHERE key=?", (key,))
+
     # jobs
     def add_job(self, name, source, dest, cron, excludes=(), kuma_url="", timeout_s=21600) -> int:
         with self.tx() as c:

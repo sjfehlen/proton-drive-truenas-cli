@@ -1,6 +1,7 @@
 # Example for Arcane on bender. Adjust host paths and the port (check the port registry).
-# Secrets (UI_PASSWORD) belong in the stack's .env, never in this file. In an Arcane .env a literal
-# `$` must be written `$$`.
+# No password is configured here: open the page the first time and create it (the setup code is in
+# the container log). Setting UI_PASSWORD instead is optional; in an Arcane .env a literal `$` must be
+# written `$$`.
 services:
   proton-backup:
     image: ghcr.io/sjfehlen/proton-drive-truenas-cli:main
@@ -12,7 +13,7 @@ services:
     environment:
       TZ: America/Chicago
       UI_USER: ${UI_USER:-admin}
-      UI_PASSWORD: ${UI_PASSWORD:?set UI_PASSWORD}
+      # UI_PASSWORD: optional; leave unset to create the password in the browser on first run
       UPLOAD_WORKERS: "2"        # starting value; the page's setting overrides it once saved
       BATCH_FILES: "50"
       BATCH_MB: "2000"

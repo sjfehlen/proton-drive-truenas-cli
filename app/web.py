@@ -8,10 +8,13 @@ import sqlite3
 import threading
 import time
 
-from fastapi import Depends, FastAPI, Form, HTTPException
+import logging
+
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
+from .auth import Auth
 from .cli import MAX_UPLOAD_WORKERS, LoginFlow, ProtonCli
 from .db import Db
 from .runner import Runner, human
@@ -22,6 +25,9 @@ table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ccc;pad
 form.inline{display:inline}input{padding:.3rem;margin:.1rem}</style>"""
 
 
+log = logging.getLogger("web")
+
+
 def esc(s) -> str:
     return html.escape(str(s))
 
@@ -30,16 +36,25 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
     app = FastAPI(title="proton-drive-truenas-cli")
     basic = HTTPBasic(auto_error=False)
     login = LoginFlow(cli)
-    password = os.environ.get("UI_PASSWORD", "")
-    user = os.environ.get("UI_USER", "admin")
-    if not password and os.environ.get("ALLOW_NO_AUTH") != "1":
-        raise RuntimeError("Set UI_PASSWORD (or ALLOW_NO_AUTH=1 for local testing only)")
+    auth_state = Auth(db)
+    if auth_state.mode == "setup":
+        auth_state.setup_code()  # logs the first-run setup code at startup
+    elif auth_state.mode == "open":
+        log.warning("ALLOW_NO_AUTH=1: the UI has NO authentication. Local testing only.")
 
-    def auth(c: HTTPBasicCredentials | None = Depends(basic)):
-        if os.environ.get("ALLOW_NO_AUTH") == "1" and not password:
+    def auth(request: Request, c: HTTPBasicCredentials | None = Depends(basic)):
+        mode = auth_state.mode
+        if mode == "open":
             return
-        ok = c is not None and secrets.compare_digest(c.username, user) and secrets.compare_digest(c.password, password)
-        if not ok:
+        if mode == "setup":
+            # Relative redirect, so it also works behind a path-prefix proxy (e.g. code-server /proxy/PORT/).
+            ups = request.url.path.strip("/").count("/")
+            raise HTTPException(303, headers={"Location": "../" * ups + "setup"})
+        if c is None or not auth_state.check(c.username, c.password):
+            if c is not None:
+                log.warning("failed UI login for user %r from %s", c.username[:40],
+                            request.client.host if request.client else "?")
+                time.sleep(1)  # slows password guessing
             raise HTTPException(401, headers={"WWW-Authenticate": "Basic"})
 
     def bg(fn, *a):
@@ -65,6 +80,17 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
             lg = ""
             if login.finished_ok is False:
                 lg = f"<p class=failed>Last login attempt failed: {esc(' | '.join(login.lines[-3:]))}</p>"
+        if auth_state.mode == "env":
+            pw_section = ("<p><small>The UI password is set by the <code>UI_PASSWORD</code> environment variable. "
+                          "Remove it to manage the password here.</small></p>")
+        elif auth_state.mode == "open":
+            pw_section = "<p class=failed><b>Authentication is OFF</b> (ALLOW_NO_AUTH=1). Local testing only.</p>"
+        else:
+            pw_section = (f"<details><summary>Change UI password</summary><form method=post action=settings/password>"
+                          f"<input type=password name=current placeholder='current password' autocomplete=current-password required> "
+                          f"<input type=password name=new placeholder='new password (min {Auth.MIN_LEN})' autocomplete=new-password required> "
+                          f"<input type=password name=confirm placeholder='repeat new password' autocomplete=new-password required> "
+                          f"<button>Change</button></form></details>")
         pr = runner.progress
         running = ""
         if pr:
@@ -104,6 +130,7 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
 <button>Save</button> <small>1&ndash;{MAX_UPLOAD_WORKERS}. Applies right away: running uploads finish, new ones follow the new limit.
 More is not always faster (the internet line and Proton are the limit) and overlapping uploads sometimes retry on
 &ldquo;database is locked&rdquo;.</small></form>
+{pw_section}
 <h2>Jobs</h2><table><tr><th>Job</th><th>Schedule</th><th>Last run</th><th></th></tr>{rows}</table>
 <h3>Add job</h3><form method=post action=jobs>
 <input name=name placeholder=name required> <input name=source placeholder=/source/path required>
@@ -125,6 +152,53 @@ More is not always faster (the internet line and Proton are the limit) and overl
 <p class="{esc(r['status'])}"><b>{esc(r['status'])}</b>{' (dry run)' if r['dry_run'] else ''} &middot;
 {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(r['started']))}</p><p>{esc(r['summary'])}</p>
 <h2>Errors ({len(errs)})</h2><table><tr><th>Time</th><th>Where</th><th>Message</th></tr>{rows}</table>"""
+
+    @app.get("/setup", response_class=HTMLResponse)
+    def setup_page(error: str = ""):
+        if auth_state.mode != "setup":
+            return RedirectResponse("./", 303)
+        auth_state.setup_code()  # make sure a code exists and is in the log (e.g. after a password reset)
+        return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><title>Set up</title>{STYLE}
+<h1>First-run setup</h1>
+<p>Create the password for this page. The user name will be <b>{esc(auth_state.user)}</b>.</p>
+<p>Enter the <b>setup code</b> from the container log (look for <code>FIRST-RUN SETUP</code>). It proves you have access to the server,
+so nobody else on the network can claim this page first.</p>
+{f'<p class=failed><b>{esc(error)}</b></p>' if error else ''}
+<form method=post action=setup>
+<p><input name=code placeholder="setup code" size=24 autocomplete=off required></p>
+<p><input type=password name=password placeholder="new password (min {Auth.MIN_LEN} characters)" size=32 autocomplete=new-password required></p>
+<p><input type=password name=confirm placeholder="repeat password" size=32 autocomplete=new-password required></p>
+<button>Create password</button></form>"""
+
+    @app.post("/setup", response_class=HTMLResponse)
+    def setup_submit(request: Request, code: str = Form(""), password: str = Form(""), confirm: str = Form("")):
+        if auth_state.mode != "setup":
+            return RedirectResponse("./", 303)
+        problem = None
+        if not auth_state.code_matches(code):
+            log.warning("first-run setup: wrong setup code from %s", request.client.host if request.client else "?")
+            time.sleep(1)
+            problem = "The setup code is wrong. Copy it from the container log."
+        else:
+            problem = Auth.password_problem(password, confirm)
+        if problem:
+            return HTMLResponse(setup_page(problem), status_code=400)
+        auth_state.set_password(password)
+        return RedirectResponse("./", 303)
+
+    @app.post("/settings/password", dependencies=[Depends(auth)])
+    def change_password(request: Request, current: str = Form(""), new: str = Form(""), confirm: str = Form("")):
+        if auth_state.mode != "db":
+            raise HTTPException(400, "The password is managed outside the UI (UI_PASSWORD or no auth).")
+        if not auth_state.check(auth_state.user, current):
+            log.warning("password change refused: wrong current password from %s", request.client.host if request.client else "?")
+            time.sleep(1)
+            raise HTTPException(400, "The current password is wrong.")
+        problem = Auth.password_problem(new, confirm)
+        if problem:
+            raise HTTPException(400, problem)
+        auth_state.set_password(new)
+        return RedirectResponse("../", 303)
 
     @app.post("/settings", dependencies=[Depends(auth)])
     def save_settings(workers: str = Form()):

@@ -28,13 +28,26 @@ Not in v0: remote deletes (copy only), restore UI, multiple accounts, running se
 The image does **not** contain Proton's CLI. Download the Linux `proton-drive` binary from Proton ([support page](https://proton.me/support/drive-cli)), make it executable, and mount it into the container. Developed against CLI 0.6.0; pin whichever version you test.
 
 1. Put the binary on the host, for example `/mnt/Storage/Application/Arcane/proton-backup/bin/proton-drive`, and create the data folder (owned by the container user, mode 700).
-2. Use [compose.example.yaml](compose.example.yaml): it pulls `ghcr.io/sjfehlen/proton-drive-truenas-cli:main` (built by [.github/workflows/image.yml](.github/workflows/image.yml)). Set `UI_PASSWORD` and your host paths.
-3. Start it, open the page, click **Log in to Proton**, open the URL it shows, finish signing in.
+2. Use [compose.example.yaml](compose.example.yaml): it pulls `ghcr.io/sjfehlen/proton-drive-truenas-cli:main` (built by [.github/workflows/image.yml](.github/workflows/image.yml)). Set your host paths.
+3. Start it and open the page. The first time, it asks you to **create the UI password** (see [Password](#password)). Then click **Log in to Proton**, open the URL it shows, and finish signing in.
 4. Add a job and run it with **Dry run** first.
 
-To run without Docker: `uv sync && DATA_DIR=./data UI_PASSWORD=... PROTON_CLI_BIN=$(which proton-drive) uv run python -m app.main`.
+To run without Docker: `uv sync && DATA_DIR=./data PROTON_CLI_BIN=$(which proton-drive) uv run python -m app.main`.
 
-The UI refuses to start without `UI_PASSWORD` (set `ALLOW_NO_AUTH=1` for local testing only). Do not expose it to the internet without SSO in front.
+## Password
+
+You choose the password in the browser the first time, so none has to be put in a config file.
+
+1. Open the page. Until a password exists, every page except `/healthz` redirects to **First-run setup**.
+2. The form asks for a **setup code**. The app prints it in the container log at startup (look for `FIRST-RUN SETUP`). This proves you can read the server's logs, so nobody else on the network can claim the page first.
+3. Choose a password of at least 10 characters. The user name is `admin` (`UI_USER` changes it).
+4. From then on the browser asks for the user name and password (HTTP Basic). Only a salted scrypt hash is stored, in the app's database, never the password.
+
+Change it later under **Change UI password** on the page. **Forgot it?** Run `docker exec proton-backup python -m app.reset_password`, then open the page: first-run setup is back, with a new code in the log. Jobs, history and the Proton login are untouched.
+
+If you set `UI_PASSWORD` in the environment, that password is used instead, the page shows it is managed outside the app, and it cannot be changed from the UI. `ALLOW_NO_AUTH=1` turns authentication off for local testing only.
+
+Do not expose the page to the internet without SSO in front.
 
 The page uses relative links, so it also works behind a path-prefix proxy such as code-server's `/proxy/<port>/` (use the trailing slash).
 
@@ -42,7 +55,8 @@ The page uses relative links, so it also works behind a path-prefix proxy such a
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `UI_USER` / `UI_PASSWORD` | `admin` / required | HTTP Basic credentials for the UI |
+| `UI_USER` | `admin` | User name for the UI |
+| `UI_PASSWORD` | unset | Optional. If set, it is the UI password and the first-run setup and the in-page change are disabled. Leave it unset to choose the password in the browser |
 | `DATA_DIR` | `/data` | State DB and Proton session. The session file is a credential: keep it mode 700, off any shared backup |
 | `PORT` | `8080` | Listen port inside the container |
 | `STALE_DAYS`, `STALE_PING_URL` | `3`, unset | Optional "no recent success" alert |
@@ -65,7 +79,7 @@ Tests use `tests/fake_cli.py`, a stand-in for `proton-drive` that can simulate a
 - The Proton session file in `DATA_DIR/session` grants access to the whole Proton account. Treat it like a password.
 - Kuma push URLs contain tokens. They are stored in the DB, never rendered in the UI, and never logged.
 - Sources are mounted read-only; the container runs as a non-root user.
-- The UI is protected by HTTP Basic auth only. Keep it on the LAN or behind SSO.
+- The UI is protected by HTTP Basic auth only, with a salted scrypt hash stored in the database, a 1 s delay after each failed attempt (failures are logged with the client address), and a log-only setup code for first use. Keep it on the LAN or behind SSO.
 
 ## Logs
 
@@ -80,6 +94,8 @@ Everything goes to stdout, one event per line, so a Docker log collector picks i
 | `... batch N/M stalled; retrying (1/1)` | WARNING | The watchdog killed a stalled upload |
 | `cli_failed cmd='filesystem upload' exit=1 out='...'` | WARNING | Any CLI call that failed, with its output. Exit 125 = stalled, 124 = timed out, 130 = stopped by you |
 | `cli_thumbnail_fallback retrying batch of N files without thumbnails` | WARNING | The CLI could not thumbnail an image; the batch is retried with `--skip-thumbnails` |
+| `FIRST-RUN SETUP: ... Setup code (needed on that page): <code>` | WARNING | No UI password exists yet; the code is needed on the setup page. Not printed once a password exists |
+| `failed UI login for user 'x' from <ip>` | WARNING | A wrong password was tried |
 | `cli_busy cmd='...' retry N/4 (CLI cache locked by another CLI process)` | WARNING | A call hit `database is locked` and is being retried |
 | `... error place='upload /my-files/X' exit 1: ...; batch 3/12 of 50 files, 2.0 GB: a.jpg, b.jpg, c.jpg (+47 more)` | ERROR | One per failed batch or folder, naming the files |
 | `stop requested for job id=N` | WARNING | You pressed Stop |
