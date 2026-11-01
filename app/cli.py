@@ -26,6 +26,39 @@ BUSY_MARKERS = ("database is locked", "SQLITE_BUSY")
 BUSY_ATTEMPTS = 5
 
 
+MAX_UPLOAD_WORKERS = 8
+
+
+class ResizableSlots:
+    """A semaphore whose limit can change while it is in use (raising it wakes waiters at once;
+    lowering it lets running uploads finish and applies to the next ones)."""
+
+    def __init__(self, limit: int):
+        self._limit, self._used = limit, 0
+        self._cond = threading.Condition()
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    def set_limit(self, n: int) -> None:
+        with self._cond:
+            self._limit = n
+            self._cond.notify_all()
+
+    def __enter__(self):
+        with self._cond:
+            while self._used >= self._limit:
+                self._cond.wait()
+            self._used += 1
+        return self
+
+    def __exit__(self, *exc) -> None:
+        with self._cond:
+            self._used -= 1
+            self._cond.notify_all()
+
+
 def is_busy(text: str) -> bool:
     return any(m in text for m in BUSY_MARKERS)
 
@@ -90,10 +123,26 @@ class ProtonCli:
         # Short calls (list/info/create-folder) run one at a time: overlapping them once produced a
         # spurious "session dead" result. Uploads may overlap, up to UPLOAD_WORKERS at once. Measured
         # on CLI 0.6.0: two uploads side by side ran cleanly and raised total throughput about 1.4x.
-        self.upload_workers = max(1, int(os.environ.get("UPLOAD_WORKERS", "2")))
+        self._upload_slots = ResizableSlots(
+            max(1, min(MAX_UPLOAD_WORKERS, int(os.environ.get("UPLOAD_WORKERS", "2")))))
         self._meta_lock = threading.Lock()
-        self._upload_slots = threading.Semaphore(self.upload_workers)
+        self._cancel = threading.Event()  # set by "Stop job": running uploads are killed, queued ones skipped
         self._status: tuple[float, CliResult] | None = None
+
+    @property
+    def upload_workers(self) -> int:
+        return self._upload_slots.limit
+
+    def set_upload_workers(self, n: int) -> int:
+        n = max(1, min(MAX_UPLOAD_WORKERS, int(n)))
+        self._upload_slots.set_limit(n)
+        return n
+
+    def cancel_uploads(self) -> None:
+        self._cancel.set()
+
+    def reset_cancel(self) -> None:
+        self._cancel.clear()
 
     def reset_cache(self) -> None:
         self.known_folders.clear()
@@ -212,6 +261,8 @@ class ProtonCli:
         """
         cmd = " ".join(args[:2])
         with self._upload_slots, tempfile.TemporaryFile("w+") as out:
+            if self._cancel.is_set():  # stopped while waiting for a free upload slot
+                return CliResult(False, 130, "stopped by user")
             try:
                 proc = subprocess.Popen([self.binary, *args], stdout=out, stderr=subprocess.STDOUT,
                                         text=True, env=self._env())
@@ -227,16 +278,20 @@ class ProtonCli:
                 log.warning("stall watchdog unavailable (no /proc); relying on the timeout only")
             reason = ""
             code = 0
+            tick, last_poll = min(self.poll_s, 1.0), start
             while True:
                 try:
-                    proc.wait(timeout=self.poll_s)
+                    proc.wait(timeout=tick)
                     break
                 except subprocess.TimeoutExpired:
                     pass
                 now = time.time()
-                if now - start > timeout:
+                if self._cancel.is_set():
+                    reason, code = "stopped by user", 130
+                elif now - start > timeout:
                     reason, code = f"timed out after {int(timeout)}s", 124
-                elif watch:
+                elif watch and now - last_poll >= self.poll_s:
+                    last_poll = now
                     try:
                         a = self.activity_fn(proc.pid)
                     except OSError:
@@ -256,7 +311,7 @@ class ProtonCli:
             out.seek(0)
             text = out.read().strip()
             if reason:
-                log.warning("cli_failed cmd=%r exit=%d out=%r", cmd, code, reason)
+                (log.info if code == 130 else log.warning)("cli_failed cmd=%r exit=%d out=%r", cmd, code, reason)
                 return CliResult(False, code, f"{reason}; {one_line(text, 200)}" if text else reason)
             res = CliResult(proc.returncode == 0, proc.returncode, text)
             if not res.ok:

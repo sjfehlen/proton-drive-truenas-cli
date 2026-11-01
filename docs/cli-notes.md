@@ -32,11 +32,18 @@ a dry run and a real upload.
 
 - **Overlapping CLI processes can fail with `SQLiteError: database is locked (SQLITE_BUSY)`.** The CLI opens a SQLite cache in its state dir at startup. A `create-folder` (and probably any call) that starts while another process has it busy dies before doing any work. Seen with two parallel uploads: 5 `create-folder` calls failed in one run and skipped 24 files. The adapter now retries these up to 5 times with a 1-3 s random wait (log line `cli_busy`). Likely also the cause of the one-off "session dead" result seen earlier.
 
+- **Killing the CLI mid-upload is safe.** The app was restarted several times with CLI uploads killed in flight (SIGTERM, then SIGKILL). Every resume skipped exactly the files from finished batches and re-uploaded the rest with `replace`, with no duplicate files and nothing added to the Proton trash. The Stop button uses the same SIGTERM.
+- **Resume cost:** an interrupted run loses only the batches in flight, so batch size sets the worst case (2 GB at the largest tested size).
+
+## Environment notes
+
+- Gateway check on 2026-11-01: uploads left through the Spectrum WAN, with the gateway sending about 40 Mbps upstream in total while the CLI used roughly 25-35 Mbps of that. The line, not only the CLI, limits speed. Run comparisons against other tools over the same WAN at the same time of day.
+
 ## Still to test
 
 1. Recreate the container (not just the process) and confirm the session survives in the mounted volume.
-2. Kill the process mid-run (an interrupted run was observed to leave the batch unindexed, so it re-uploads), restart, and confirm the next run resumes (the index only records batches that finished).
-3. ~~Change a file and confirm only that file uploads~~ — done: one file uploaded in 11 s.
-4. Compare speed against rclone on the Immich set, and check whether the CLI can see the files rclone already uploaded.
-5. Session lifetime: leave it for several days and check that jobs still authenticate.
-6. Newer CLI builds (0.8.0+) rename strategies; re-check `--help` before upgrading.
+2. Session lifetime: leave it for several days and check that jobs still authenticate.
+3. Many small files: a tree with thousands of files and hundreds of folders. Each folder costs a probe plus a create (2-4 s each), so folder-heavy trees may be slow.
+4. Compare speed against rclone on the same data and WAN, and check whether the CLI can see files rclone already uploaded.
+5. Newer CLI builds (0.8.0+) rename strategies; re-check `--help` before upgrading.
+6. Whether more than 2 parallel uploads helps on a faster line. On a ~40-45 Mbps line, 5 workers gave about the same total speed as 2 but with more lock retries.

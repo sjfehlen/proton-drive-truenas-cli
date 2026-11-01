@@ -25,6 +25,9 @@ def build():
     db = Db(os.path.join(data, "state.db"))
     db.mark_stale_runs()
     cli = ProtonCli(session_dir=os.path.join(data, "session"))
+    saved = db.get_setting("upload_workers")  # a value saved in the UI wins over UPLOAD_WORKERS
+    if saved:
+        cli.set_upload_workers(int(saved))
     runner = Runner(db, cli)
     sched = Scheduler(db, runner,
                       stale_days=int(os.environ.get("STALE_DAYS", "3")),

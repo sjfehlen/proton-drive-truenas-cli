@@ -13,7 +13,7 @@ import urllib.request
 from collections import defaultdict
 from pathlib import PurePosixPath
 
-from .cli import ProtonCli, one_line
+from .cli import MAX_UPLOAD_WORKERS, ProtonCli, one_line
 from .db import Db
 
 log = logging.getLogger("runner")
@@ -77,6 +77,9 @@ class Runner:
         self._lock = threading.Lock()  # one job at a time, replaces flock
         self.busy_job: int | None = None
         self.progress: dict | None = None  # live view for the web page while a job runs
+        self.stop_requested = threading.Event()
+        self.waiting: set[int] = set()          # jobs queued behind the running one
+        self._cancelled_waiting: set[int] = set()
         self._stored: dict[int, int] = {}
         self._err_lock = threading.Lock()
 
@@ -84,7 +87,13 @@ class Runner:
         job = self.db.job(job_id)
         if job is None:
             return "missing"
+        self.waiting.add(job_id)
         with self._lock:
+            self.waiting.discard(job_id)
+            if job_id in self._cancelled_waiting:  # stopped while still queued
+                self._cancelled_waiting.discard(job_id)
+                log.info("job=%s queued run cancelled before it started", job["name"])
+                return "stopped"
             self.busy_job = job_id
             try:
                 return self._run(job, dry_run)
@@ -92,6 +101,18 @@ class Runner:
                 self.busy_job = None
 
     MAX_STORED_ERRORS = 200
+
+    def request_stop(self, job_id: int) -> str:
+        """Stop a running job (kill its uploads, skip the rest) or cancel a queued one."""
+        if self.busy_job == job_id:
+            log.warning("stop requested for job id=%d", job_id)
+            self.stop_requested.set()
+            self.cli.cancel_uploads()
+            return "stopping"
+        if job_id in self.waiting:
+            self._cancelled_waiting.add(job_id)
+            return "cancelled"
+        return "not running"
 
     def _error(self, job, run_id: int, place: str, message: str) -> None:
         """Log every failure; store the first MAX_STORED_ERRORS per run for the web page."""
@@ -106,9 +127,9 @@ class Runner:
 
     def _finish(self, job, run_id, status, summary, dry_run):
         self.db.finish_run(run_id, status, summary)
-        log.log(logging.ERROR if status != "ok" else logging.INFO,
-                "job=%s run=%d status=%s dry_run=%s %s", job["name"], run_id, status, dry_run, summary)
-        if not dry_run:
+        level = {"ok": logging.INFO, "stopped": logging.WARNING}.get(status, logging.ERROR)
+        log.log(level, "job=%s run=%d status=%s dry_run=%s %s", job["name"], run_id, status, dry_run, summary)
+        if not dry_run and status != "stopped":  # a deliberate stop is not an alert
             ping(job["kuma_url"], status == "ok", f"{job['name']}: {summary}", job["name"])
         return status
 
@@ -117,6 +138,8 @@ class Runner:
         deadline = t0 + job["timeout_s"]
         run_id = self.db.start_run(job["id"], dry_run)
         self.cli.reset_cache()
+        self.cli.reset_cancel()
+        self.stop_requested.clear()
         log.info("job=%s run=%d start dry_run=%s source=%s dest=%s", job["name"], run_id, dry_run,
                  job["source"], job["dest"])
 
@@ -175,6 +198,8 @@ class Runner:
                  human(BATCH_BYTES), workers)
 
         def work(chunk, remote_dir, batch_no):
+            if self.stop_requested.is_set():
+                return
             if time.time() > deadline:
                 with st_lock:
                     st["timed_out"] += len(chunk)
@@ -194,6 +219,8 @@ class Runner:
             finally:
                 with st_lock:
                     self.progress["active"] -= 1
+            if r.code == 130:  # killed by Stop: not a failure, and not indexed (the next run redoes it)
+                return
             secs = max(time.time() - bt, 0.001)
             if r.ok:
                 self.db.record_files(job["id"], [(c[1], c[2], c[3]) for c in chunk])
@@ -217,8 +244,12 @@ class Runner:
 
         try:
             batch_no = 0
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="upload") as pool:
+            # The pool is sized at the cap; the CLI's resizable limiter decides how many upload at once,
+            # so the setting can change mid-run.
+            with ThreadPoolExecutor(max_workers=MAX_UPLOAD_WORKERS, thread_name_prefix="upload") as pool:
                 for remote_dir, items, batches in plan:
+                    if self.stop_requested.is_set():
+                        break
                     # Folders are created here, one at a time, so parallel uploads never race on mkdir.
                     r = self.cli.ensure_folder(remote_dir)
                     if not r.ok:
@@ -235,6 +266,11 @@ class Runner:
         finally:
             self.progress = None
         uploaded, failed = st["uploaded"], st["failed"]
+        if self.stop_requested.is_set():
+            return self._finish(job, run_id, "stopped",
+                                f"stopped by user after {int(time.time()-t0)}s; {uploaded} uploaded, {failed} failed, "
+                                f"{pending-uploaded-failed} not done. Uploaded files are kept; the next run continues",
+                                dry_run)
         if st["timed_out"]:
             return self._finish(job, run_id, "failed",
                                 f"timeout after {int(time.time()-t0)}s; {uploaded} uploaded, {pending-uploaded} left",

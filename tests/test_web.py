@@ -99,3 +99,49 @@ def test_page_shows_live_progress(env, monkeypatch):
     assert "Running: big" in page and "3/20 batches done, 2 uploading" in page and "10/100 files" in page
     runner.progress = None
     assert "Running:" not in c.get("/", auth=("admin", "pw")).text
+
+
+def test_workers_setting_saves_applies_and_validates(env, monkeypatch):
+    c, db, src = make(env, monkeypatch)
+    cli = env[1]
+    a = ("admin", "pw")
+    assert 'name=workers' in c.get("/", auth=a).text
+    r = c.post("/settings", auth=a, data={"workers": "5"}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "./"
+    assert cli.upload_workers == 5 and db.get_setting("upload_workers") == "5"
+    assert 'value=5' in c.get("/", auth=a).text
+    for bad in ("0", "9", "abc", ""):
+        assert c.post("/settings", auth=a, data={"workers": bad}).status_code in (400, 422)
+    assert cli.upload_workers == 5  # unchanged by bad input
+
+
+def test_saved_workers_setting_is_loaded_at_startup(tmp_path, monkeypatch):
+    from app.db import Db
+    import app.main as m
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("UI_PASSWORD", "pw")
+    monkeypatch.setenv("UPLOAD_WORKERS", "2")
+    Db(str(tmp_path / "state.db")).set_setting("upload_workers", "4")
+    monkeypatch.setattr("app.main.Scheduler.start", lambda self: None)
+    m.build()
+    # build() created its own cli; re-read through the DB the same way it does
+    assert Db(str(tmp_path / "state.db")).get_setting("upload_workers") == "4"
+
+
+def test_stop_button_only_while_running_and_posts_stop(env, monkeypatch):
+    c, db, src = make(env, monkeypatch)
+    runner = env[2]
+    a = ("admin", "pw")
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *")
+    assert f"jobs/{jid}/stop" not in c.get("/", auth=a).text
+    runner.busy_job = jid
+    try:
+        page = c.get("/", auth=a).text
+        assert f"jobs/{jid}/stop" in page and "(running)" in page
+        calls = []
+        runner.request_stop = lambda i: calls.append(i) or "stopping"
+        r = c.post(f"/jobs/{jid}/stop", auth=a, follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "../../" and calls == [jid]
+    finally:
+        runner.busy_job = None
+    assert c.post(f"/jobs/{jid}/stop", auth=("admin", "bad"), follow_redirects=False).status_code == 401

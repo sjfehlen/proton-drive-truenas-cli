@@ -12,13 +12,13 @@ from fastapi import Depends, FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-from .cli import LoginFlow, ProtonCli
+from .cli import MAX_UPLOAD_WORKERS, LoginFlow, ProtonCli
 from .db import Db
 from .runner import Runner, human
 
 STYLE = """<style>body{font:15px system-ui;margin:2rem auto;max-width:960px;padding:0 1rem}
 table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ccc;padding:.4rem;text-align:left;vertical-align:top}
-.ok{color:#1a7f37}.failed{color:#cf222e}.running{color:#9a6700}code{word-break:break-all}
+.ok{color:#1a7f37}.stopped{color:#6e7781}.failed{color:#cf222e}.running{color:#9a6700}code{word-break:break-all}
 form.inline{display:inline}input{padding:.3rem;margin:.1rem}</style>"""
 
 
@@ -72,7 +72,7 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
             eta = f", about {int(left / rate / 60)} min left" if rate > 0 and pr["done_bytes"] else ""
             running = (f"<p class=running><b>Running: {esc(pr['job'])}</b> (run <a href=runs/{pr['run']}>{pr['run']}</a>) &mdash; "
                        f"{pr['batch']}/{pr['batches']} batches done, {pr.get('active', 0)} uploading "
-                       f"(up to {pr.get('workers', 1)} at once); "
+                       f"(up to {cli.upload_workers} at once); "
                        f"{pr['uploaded']}/{pr['files']} files, {human(pr['done_bytes'])} of {human(pr['bytes'])} uploaded"
                        f"{', ' + str(pr['failed']) + ' failed' if pr['failed'] else ''}; "
                        f"{int(now - pr['started'])}s elapsed{eta}. Reload to refresh.</p>")
@@ -81,10 +81,15 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
             r = db.last_run(j["id"])
             last = (f'<span class="{esc(r["status"])}">{esc(r["status"])}</span> '
                     f'{time.strftime("%m-%d %H:%M", time.localtime(r["started"]))}<br>{esc(r["summary"])}') if r else "never"
-            busy = " (running)" if runner.busy_job == j["id"] else ""
+            is_running = runner.busy_job == j["id"]
+            is_queued = j["id"] in runner.waiting
+            busy = " (running)" if is_running else " (queued)" if is_queued else ""
+            stop_btn = (f"<form class=inline method=post action=jobs/{j['id']}/stop "
+                        f"onsubmit=\"return confirm('Stop this job? Finished uploads are kept; running ones are cancelled.')\">"
+                        f"<button>Stop</button></form> ") if (is_running or is_queued) else ""
             rows += (f"<tr><td><b>{esc(j['name'])}</b>{busy}<br><code>{esc(j['source'])}</code> &rarr; <code>{esc(j['dest'])}</code></td>"
                      f"<td><code>{esc(j['cron'])}</code><br>{'enabled' if j['enabled'] else 'disabled'}</td><td>{last}</td><td>"
-                     f"<form class=inline method=post action=jobs/{j['id']}/run><button>Run</button></form> "
+                     f"{stop_btn}<form class=inline method=post action=jobs/{j['id']}/run><button>Run</button></form> "
                      f"<form class=inline method=post action=jobs/{j['id']}/dryrun><button>Dry run</button></form> "
                      f"<form class=inline method=post action=jobs/{j['id']}/toggle><button>{'Disable' if j['enabled'] else 'Enable'}</button></form> "
                      f"<form class=inline method=post action=jobs/{j['id']}/delete onsubmit=\"return confirm('Delete job?')\"><button>Delete</button></form></td></tr>")
@@ -95,6 +100,11 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
         return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><title>Proton backups</title>{STYLE}
 <h1>Proton Drive backups</h1><p>Session: {state}
 <form class=inline method=post action=login><button>Log in to Proton</button></form></p>{lg}{running}
+<h2>Settings</h2><form method=post action=settings>Parallel uploads
+<input type=number name=workers min=1 max={MAX_UPLOAD_WORKERS} value={cli.upload_workers} style="width:4em">
+<button>Save</button> <small>1&ndash;{MAX_UPLOAD_WORKERS}. Applies right away: running uploads finish, new ones follow the new limit.
+More is not always faster (the internet line and Proton are the limit) and overlapping uploads sometimes retry on
+&ldquo;database is locked&rdquo;.</small></form>
 <h2>Jobs</h2><table><tr><th>Job</th><th>Schedule</th><th>Last run</th><th></th></tr>{rows}</table>
 <h3>Add job</h3><form method=post action=jobs>
 <input name=name placeholder=name required> <input name=source placeholder=/source/path required>
@@ -116,6 +126,17 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
 <p class="{esc(r['status'])}"><b>{esc(r['status'])}</b>{' (dry run)' if r['dry_run'] else ''} &middot;
 {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(r['started']))}</p><p>{esc(r['summary'])}</p>
 <h2>Errors ({len(errs)})</h2><table><tr><th>Time</th><th>Where</th><th>Message</th></tr>{rows}</table>"""
+
+    @app.post("/settings", dependencies=[Depends(auth)])
+    def save_settings(workers: str = Form()):
+        try:
+            n = int(workers)
+        except ValueError:
+            raise HTTPException(400, "workers must be a whole number")
+        if not 1 <= n <= MAX_UPLOAD_WORKERS:
+            raise HTTPException(400, f"workers must be between 1 and {MAX_UPLOAD_WORKERS}")
+        db.set_setting("upload_workers", str(cli.set_upload_workers(n)))
+        return RedirectResponse("./", 303)
 
     @app.post("/login", dependencies=[Depends(auth)])
     def start_login():
@@ -148,6 +169,11 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
     @app.post("/jobs/{job_id}/run", dependencies=[Depends(auth)])
     def run(job_id: int):
         bg(runner.run_job, job_id, False)
+        return RedirectResponse("../../", 303)
+
+    @app.post("/jobs/{job_id}/stop", dependencies=[Depends(auth)])
+    def stop(job_id: int):
+        runner.request_stop(job_id)
         return RedirectResponse("../../", 303)
 
     @app.post("/jobs/{job_id}/dryrun", dependencies=[Depends(auth)])

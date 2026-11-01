@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, started REAL NOT NULL,
   finished REAL, status TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', dry_run INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS run_errors (
   run_id INTEGER NOT NULL, ts REAL NOT NULL, place TEXT NOT NULL, message TEXT NOT NULL
 );
@@ -45,6 +46,16 @@ class Db:
             except Exception:
                 self.conn.rollback()
                 raise
+
+    # settings
+    def get_setting(self, key: str, default: str | None = None) -> str | None:
+        with self.tx() as c:
+            r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            return r["value"] if r else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self.tx() as c:
+            c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, str(value)))
 
     # jobs
     def add_job(self, name, source, dest, cron, excludes=(), kuma_url="", timeout_s=21600) -> int:
