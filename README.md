@@ -28,7 +28,7 @@ Not in v0: remote deletes (copy only), restore UI, multiple accounts, running se
 
 The image does **not** contain Proton's CLI, and you do not have to install it. On first start the app downloads it from `proton.me` into `/data/bin/proton-drive`, verifies its SHA-512 checksum, and keeps it in the data folder, so it survives container recreation. The page shows "preparing the Proton CLI" while this happens (about 20 seconds) and offers a **Download the Proton CLI** button if it fails, for example when the container is offline.
 
-1. Create the data folder on the host, owned by the container user (`568:568`, mode 700), for example `/mnt/Storage/Application/Arcane/proton-backup/data`.
+1. Choose a host folder for the data, for example `/mnt/Storage/Application/Arcane/proton-backup/data`. It does not have to exist: the container creates it, makes it owned by `PUID:PGID` (default `568`) with mode 700, and then runs as that user.
 2. Use [compose.example.yaml](compose.example.yaml): it pulls `ghcr.io/sjfehlen/proton-drive-truenas-cli:main` (built by [.github/workflows/image.yml](.github/workflows/image.yml)). Set your host paths.
 3. Start it and open the page. The first time, it asks you to **create the UI password** (see [Password](#password)). Then click **Log in to Proton**, open the URL it shows, and finish signing in.
 4. Add a job and run it with **Dry run** first.
@@ -95,7 +95,7 @@ Tests use `tests/fake_cli.py`, a stand-in for `proton-drive` that can simulate a
 
 - The Proton session file in `DATA_DIR/session` grants access to the whole Proton account. Treat it like a password.
 - Kuma push URLs contain tokens. They are stored in the DB, never rendered in the UI, and never logged.
-- Sources are mounted read-only; the container runs as a non-root user.
+- Sources are mounted read-only. The container starts as root only to fix the ownership of `/data`, then drops to a non-root user (`PUID`/`PGID`, default 568, with no new privileges) before running the app.
 - The CLI is downloaded over HTTPS from `proton.me` and refused unless its SHA-512 matches. The app never runs a download it cannot verify.
 - The UI is protected by HTTP Basic auth only, with a salted scrypt hash stored in the database, a 1 s delay after each failed attempt (failures are logged with the client address), and a log-only setup code for first use. Keep it on the LAN or behind SSO.
 

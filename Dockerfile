@@ -12,13 +12,11 @@ WORKDIR /srv
 # Versions the test suite ran against.
 RUN pip install --no-cache-dir "fastapi==0.162.0" "uvicorn[standard]==0.54.0" "croniter==6.2.4" "python-multipart==0.0.33"
 COPY app ./app
+COPY --chmod=755 docker-entrypoint.sh /srv/docker-entrypoint.sh
 
-# 568 matches the owner of /mnt/Storage/Application/Arcane/* on bender.
-ARG UID=568
-RUN useradd -u ${UID} -M -d /data/home runner
-USER runner
-
-ENV DATA_DIR=/data HOME=/data/home PORT=8080 PYTHONUNBUFFERED=1
+# The entrypoint starts as root only to fix the ownership of /data, then runs the app as PUID:PGID
+# (default 568, the owner of /mnt/Storage/Application/Arcane/* on bender).
+ENV DATA_DIR=/data HOME=/data/home PORT=8080 PYTHONUNBUFFERED=1 PUID=568 PGID=568
 EXPOSE 8080
 HEALTHCHECK --interval=60s --timeout=5s --start-period=20s CMD curl -fs http://127.0.0.1:8080/healthz || exit 1
-CMD ["python", "-m", "app.main"]
+ENTRYPOINT ["/srv/docker-entrypoint.sh"]

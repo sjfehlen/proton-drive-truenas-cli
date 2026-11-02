@@ -7,11 +7,12 @@ services:
     image: ghcr.io/sjfehlen/proton-drive-truenas-cli:main
     container_name: proton-backup
     restart: unless-stopped
-    user: "568:568"
+    # Starts as root only to fix the ownership of /data, then runs as PUID:PGID (default 568).
     ports:
       - "30465:8080"
     environment:
       TZ: America/Chicago
+      # PUID/PGID: the user the app runs as; must be able to read the backup sources. Default 568.
       UI_USER: ${UI_USER:-admin}
       # UI_PASSWORD: optional; leave unset to create the password in the browser on first run
       UPLOAD_WORKERS: "2"        # starting value; the page's setting overrides it once saved
@@ -24,7 +25,8 @@ services:
       STALE_DAYS: "3"
       # STALE_PING_URL: optional Uptime Kuma push URL, pinged "down" if no job succeeds in STALE_DAYS
     volumes:
-      # State DB and the Proton session file (a credential): host-path dataset, owned by 568, mode 700.
+      # State DB, the Proton session file (a credential) and the downloaded CLI. The folder is created and
+      # owned by the container on first start if it does not exist.
       - /mnt/Storage/Application/Arcane/proton-backup/data:/data
       # Backup sources, read-only. Add one line per job source.
       - /mnt/Storage/Application/Immich:/sources/immich:ro
