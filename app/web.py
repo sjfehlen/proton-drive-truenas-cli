@@ -16,6 +16,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from .auth import Auth
 from .cli import MAX_UPLOAD_WORKERS, LoginFlow, ProtonCli
+from .cli_install import Installer
 from .db import Db
 from .runner import Runner, human
 
@@ -32,7 +33,7 @@ def esc(s) -> str:
     return html.escape(str(s))
 
 
-def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
+def create_app(db: Db, cli: ProtonCli, runner: Runner, installer: Installer | None = None) -> FastAPI:
     app = FastAPI(title="proton-drive-truenas-cli")
     basic = HTTPBasic(auto_error=False)
     login = LoginFlow(cli)
@@ -69,8 +70,13 @@ def create_app(db: Db, cli: ProtonCli, runner: Runner) -> FastAPI:
         s = cli.session_status_cached()
         if s is None:
             state = '<b class="running">unknown</b> (a job is using the Proton CLI; checked again when it finishes)'
-        elif s.code == 127:
-            state = f'<b class="failed">Proton CLI not found</b> at <code>{esc(cli.binary)}</code> &mdash; mount the binary (see the README)'
+        elif installer is not None and installer.status == "installing":
+            state = '<b class="running">preparing the Proton CLI</b> (downloading and checking it; reload in a minute)'
+        elif s.code == 127 or (installer is not None and installer.status == "failed"):
+            why = f" {esc(installer.message)}." if installer is not None and installer.status == "failed" else ""
+            retry = (" <form class=inline method=post action=cli/install><button>Download the Proton CLI</button></form>"
+                     if installer is not None and installer.enabled else "")
+            state = (f'<b class="failed">Proton CLI not available</b> at <code>{esc(cli.binary)}</code>.{why}{retry}')
         else:
             state = '<b class="ok">logged in</b>' if s.ok else f'<b class="failed">not logged in</b> (exit {s.code})'
         if login.running:
@@ -210,6 +216,12 @@ so nobody else on the network can claim this page first.</p>
             raise HTTPException(400, f"workers must be between 1 and {MAX_UPLOAD_WORKERS}")
         db.set_setting("upload_workers", str(cli.set_upload_workers(n)))
         return RedirectResponse("./", 303)
+
+    @app.post("/cli/install", dependencies=[Depends(auth)])
+    def cli_install():
+        if installer is not None and installer.status != "installing":
+            bg(installer.run)
+        return RedirectResponse("../", 303)
 
     @app.post("/login", dependencies=[Depends(auth)])
     def start_login():

@@ -14,7 +14,8 @@ A small container that runs scheduled one-way backups to Proton Drive using Prot
 - **Parallel uploads, adjustable live.** The **Parallel uploads** setting on the page (1–8, default 2) controls how many batches upload at once. It is saved, applies immediately without a restart, and a saved value overrides `UPLOAD_WORKERS`. Folders are created one at a time first, so parallel uploads never race on mkdir.
 - **Stop job.** Each running or queued job has a **Stop** button. It kills that job's running CLI uploads, skips the rest, and marks the run *stopped*. Files from finished batches are kept and the next run continues. A stop sends **no** Uptime Kuma alert, because it was deliberate. Stopping a queued job cancels it before it starts.
 - **Stall watchdog.** A CLI that moves no data (disk or network) for `STALL_SECONDS` is killed and its batch retried once.
-- **Odd file names and images.** The CLI expands local paths as globs, so names containing `{ } [ ] * ?` are escaped automatically. A batch holding an image the CLI cannot thumbnail is retried without thumbnails, so one corrupt photo cannot fail a backup forever.
+- **Automatic CLI download.** On start the app downloads Proton's `proton-drive` CLI into its data folder (`/data/bin`), checks its SHA-512, and reuses it afterwards. Nothing to install or mount by hand.
+- **Odd file names and images.** The CLI expands local paths as globs, so names with characters such as `{ } [ ] * ?` are escaped automatically, in the style the installed CLI version needs (the style differs between 0.6 and 0.9). A batch holding an image the CLI cannot thumbnail is retried without thumbnails, so one corrupt photo cannot fail a backup forever.
 - **Lock retries.** Overlapping CLI processes can fail with `SQLite … database is locked` at startup; those calls are retried automatically (see [docs/cli-notes.md](docs/cli-notes.md)).
 - **Live progress.** While a job runs the page shows batches done, uploads in flight, bytes uploaded, elapsed time and an estimate. The page never waits on the CLI.
 - **Fails loudly.** Pings Uptime Kuma `up` on success and `down` with a short reason on failure — including "session expired, log in" before any work is attempted. An optional staleness ping fires if no job has succeeded in `STALE_DAYS`.
@@ -25,14 +26,28 @@ Not in v0: remote deletes (copy only), restore UI, multiple accounts, running se
 
 ## Run it
 
-The image does **not** contain Proton's CLI. Download the Linux `proton-drive` binary from Proton ([support page](https://proton.me/support/drive-cli)), make it executable, and mount it into the container. Developed against CLI 0.6.0; pin whichever version you test.
+The image does **not** contain Proton's CLI, and you do not have to install it. On first start the app downloads it from `proton.me` into `/data/bin/proton-drive`, verifies its SHA-512 checksum, and keeps it in the data folder, so it survives container recreation. The page shows "preparing the Proton CLI" while this happens (about 20 seconds) and offers a **Download the Proton CLI** button if it fails, for example when the container is offline.
 
-1. Put the binary on the host, for example `/mnt/Storage/Application/Arcane/proton-backup/bin/proton-drive`, and create the data folder (owned by the container user, mode 700).
+1. Create the data folder on the host, owned by the container user (`568:568`, mode 700), for example `/mnt/Storage/Application/Arcane/proton-backup/data`.
 2. Use [compose.example.yaml](compose.example.yaml): it pulls `ghcr.io/sjfehlen/proton-drive-truenas-cli:main` (built by [.github/workflows/image.yml](.github/workflows/image.yml)). Set your host paths.
 3. Start it and open the page. The first time, it asks you to **create the UI password** (see [Password](#password)). Then click **Log in to Proton**, open the URL it shows, and finish signing in.
 4. Add a job and run it with **Dry run** first.
 
-To run without Docker: `uv sync && DATA_DIR=./data PROTON_CLI_BIN=$(which proton-drive) uv run python -m app.main`.
+### Which CLI version
+
+The app downloads **0.6.0** by default: the version everything here was tested against, with its checksum pinned in the code (so the download is verified without trusting a web page). Proton's CLI changes details between versions, so the app does not follow "latest" unless you ask. The 0.9.0 build was checked for the commands the app uses and for file-name handling (see [docs/cli-notes.md](docs/cli-notes.md)); other versions are untested.
+
+| Setting | Effect |
+|---|---|
+| `PROTON_CLI_VERSION=0.9.0` | Download that version instead. Allowed for versions with a pinned checksum, or the version Proton's index page currently shows |
+| `PROTON_CLI_VERSION=latest` | Follow Proton's index page. Its checksum comes from that page, so it is only as trustworthy as the page |
+| `PROTON_CLI_SHA512=<sum>` | Supply the checksum yourself for any other version |
+| `PROTON_CLI_AUTO_DOWNLOAD=0` | Never download. Mount your own binary and set `PROTON_CLI_BIN` |
+| `PROTON_CLI_BIN=/path/proton-drive` | Use this binary. If it already runs, it is left alone |
+
+A binary that is already in place is never overwritten unless you ask for a specific version.
+
+To run without Docker: `uv sync && DATA_DIR=./data uv run python -m app.main` (the CLI is downloaded into `./data/bin`), or add `PROTON_CLI_BIN=$(which proton-drive)` to use one you already have.
 
 ## Password
 
@@ -61,7 +76,9 @@ The page uses relative links, so it also works behind a path-prefix proxy such a
 | `PORT` | `8080` | Listen port inside the container |
 | `STALE_DAYS`, `STALE_PING_URL` | `3`, unset | Optional "no recent success" alert |
 | `FILE_CONFLICT_STRATEGY`, `FOLDER_CONFLICT_STRATEGY` | `replace`, `merge` | Passed to `filesystem upload` (values valid in CLI 0.6.0: merge, keep-both, replace, skip) |
-| `PROTON_CLI_BIN` | `proton-drive` | CLI path |
+| `PROTON_CLI_BIN` | `<DATA_DIR>/bin/proton-drive` | CLI path. If it points at a working binary, nothing is downloaded |
+| `PROTON_CLI_VERSION`, `PROTON_CLI_SHA512`, `PROTON_CLI_AUTO_DOWNLOAD` | `0.6.0`, unset, `1` | Which CLI the app downloads and whether it may; see [Which CLI version](#which-cli-version) |
+| `GLOB_MODE` | detected | Force the file-name escaping style (`backslash` or `bracket-class`). Normally chosen from the CLI version, with an automatic fallback |
 | `BATCH_FILES`, `BATCH_MB` | `25`, `500` | Max files and megabytes per CLI upload call. A failure or stall costs at most one batch. Larger batches (50 files / 2000 MB) were used in testing |
 | `UPLOAD_WORKERS` | `2` | **Starting value** for parallel uploads (1–8). Once changed on the page, the saved value wins. Measured on CLI 0.6.0: two uploads raised throughput about 1.4x on a ~40–45 Mbps line. A five-worker test was not faster and had more lock retries (inconclusive: small batches) |
 | `STALL_SECONDS` | `600` | An upload that moves no data for this long is killed and the batch retried once. Measured pauses on CLI 0.6.0 reach about 4 minutes, so don't set this low |
@@ -79,6 +96,7 @@ Tests use `tests/fake_cli.py`, a stand-in for `proton-drive` that can simulate a
 - The Proton session file in `DATA_DIR/session` grants access to the whole Proton account. Treat it like a password.
 - Kuma push URLs contain tokens. They are stored in the DB, never rendered in the UI, and never logged.
 - Sources are mounted read-only; the container runs as a non-root user.
+- The CLI is downloaded over HTTPS from `proton.me` and refused unless its SHA-512 matches. The app never runs a download it cannot verify.
 - The UI is protected by HTTP Basic auth only, with a salted scrypt hash stored in the database, a 1 s delay after each failed attempt (failures are logged with the client address), and a log-only setup code for first use. Keep it on the LAN or behind SSO.
 
 ## Logs
@@ -96,6 +114,8 @@ Everything goes to stdout, one event per line, so a Docker log collector picks i
 | `cli_thumbnail_fallback retrying batch of N files without thumbnails` | WARNING | The CLI could not thumbnail an image; the batch is retried with `--skip-thumbnails` |
 | `FIRST-RUN SETUP: ... Setup code (needed on that page): <code>` | WARNING | No UI password exists yet; the code is needed on the setup page. Not printed once a password exists |
 | `failed UI login for user 'x' from <ip>` | WARNING | A wrong password was tried |
+| `cli_install ... downloading Proton CLI 0.6.0` / `... downloaded to ... (SHA-512 verified)` | WARNING / INFO | The automatic CLI download, and its result. A failure is logged as ERROR and shown on the page |
+| `cli_glob_fallback ...` | WARNING | The CLI rejected the file-name escaping style; the other style is tried and remembered |
 | `cli_busy cmd='...' retry N/4 (CLI cache locked by another CLI process)` | WARNING | A call hit `database is locked` and is being retried |
 | `... error place='upload /my-files/X' exit 1: ...; batch 3/12 of 50 files, 2.0 GB: a.jpg, b.jpg, c.jpg (+47 more)` | ERROR | One per failed batch or folder, naming the files |
 | `stop requested for job id=N` | WARNING | You pressed Stop |

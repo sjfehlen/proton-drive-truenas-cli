@@ -8,6 +8,14 @@ args = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(json.dumps(args) + "\n")
 
+if args[:1] == ["version"]:
+    if os.environ.get("FAKE_VERSION"):
+        print(f"Proton Drive CLI cli-drive@{os.environ['FAKE_VERSION']}+abc123")
+    sys.exit(0)
+if (args[:2] == ["filesystem", "upload"] and os.environ.get("FAKE_REJECT_BACKSLASH") == "1"
+        and any(a.startswith("/") and "\\" in a for a in args)):
+    print("Transfer summary:\n  Uploaded: 0 items (0 B)\n  No paths matched: " + next(a for a in args if "\\" in a))
+    sys.exit(1)
 flaky = os.environ.get("FAKE_FLAKY_ONCE")
 if flaky and args[:2] == ["filesystem", "list"] and not os.path.exists(flaky):
     open(flaky, "w").close()

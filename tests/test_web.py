@@ -113,6 +113,7 @@ def test_saved_workers_setting_is_loaded_at_startup(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("UI_PASSWORD", "pw")
     monkeypatch.setenv("UPLOAD_WORKERS", "2")
+    monkeypatch.setenv("PROTON_CLI_AUTO_DOWNLOAD", "0")  # never download the real CLI in a test
     Db(str(tmp_path / "state.db")).set_setting("upload_workers", "4")
     monkeypatch.setattr("app.main.Scheduler.start", lambda self: None)
     m.build()
@@ -143,7 +144,7 @@ def test_page_says_so_when_the_cli_binary_is_missing(env, monkeypatch):
     c, db, src = make(env, monkeypatch)
     env[1].binary = "/nonexistent/proton-drive"
     page = c.get("/", auth=("admin", "pw")).text
-    assert "Proton CLI not found" in page and "/nonexistent/proton-drive" in page
+    assert "Proton CLI not available" in page and "/nonexistent/proton-drive" in page
 
 
 
@@ -272,3 +273,53 @@ def test_reset_command_reopens_first_run_setup(env, monkeypatch, caplog, tmp_pat
     pw2 = "second correct horse"
     r = c.post("/setup", data={"code": _code(caplog), "password": pw2, "confirm": pw2}, follow_redirects=False)
     assert r.status_code == 303 and c.get("/", auth=("admin", pw2)).status_code == 200
+
+
+
+# ---- CLI auto-download on the page ----
+
+def make_with_installer(env, monkeypatch, status, message="", enabled=True):
+    from app.cli_install import Installer
+    db, cli, runner, src, log = env
+    monkeypatch.setenv("UI_PASSWORD", "pw")
+    inst = Installer("/nonexistent/proton-drive", enabled=enabled)
+    inst.status, inst.message = status, message
+    cli.binary = "/nonexistent/proton-drive"
+    return TestClient(create_app(db, cli, runner, inst)), inst
+
+
+def test_page_shows_download_in_progress(env, monkeypatch):
+    c, inst = make_with_installer(env, monkeypatch, "installing")
+    page = c.get("/", auth=("admin", "pw")).text
+    assert "preparing the Proton CLI" in page and "Download the Proton CLI" not in page
+
+
+def test_page_shows_install_failure_and_a_retry_button(env, monkeypatch):
+    c, inst = make_with_installer(env, monkeypatch, "failed", "could not reach proton.me <x>")
+    page = c.get("/", auth=("admin", "pw")).text
+    assert "Proton CLI not available" in page and "could not reach proton.me &lt;x&gt;" in page
+    assert "action=cli/install" in page
+
+
+def test_no_retry_button_when_auto_download_is_off(env, monkeypatch):
+    c, inst = make_with_installer(env, monkeypatch, "failed", "turned off", enabled=False)
+    assert "action=cli/install" not in c.get("/", auth=("admin", "pw")).text
+
+
+def test_cli_install_button_needs_auth_and_runs_the_installer(env, monkeypatch):
+    c, inst = make_with_installer(env, monkeypatch, "failed", "x")
+    calls = []
+    monkeypatch.setattr(inst, "run", lambda: calls.append(1))
+    assert c.post("/cli/install", follow_redirects=False).status_code == 401 and calls == []
+    r = c.post("/cli/install", auth=("admin", "pw"), follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "../"
+    assert _wait_until(lambda: calls == [1])
+
+
+def _wait_until(cond, secs=5):
+    t0 = time.time()
+    while time.time() - t0 < secs:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return False

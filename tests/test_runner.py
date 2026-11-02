@@ -498,3 +498,42 @@ def test_unthumbnailable_image_is_retried_without_thumbnails(env, monkeypatch, c
     assert len(ups) == 2 and "--skip-thumbnails" not in ups[0] and "--skip-thumbnails" in ups[1]
     assert "cli_thumbnail_fallback" in caplog.text
     assert "broken.jpg" in db.indexed(jid)  # indexed, so it is not retried every night
+
+
+# ---- version-aware file-name escaping ----
+
+def test_escaping_style_follows_the_cli_version():
+    from app.cli import glob_escape as g, mode_for_version as m
+    assert [m(v) for v in ("0.6.0", "0.8.9", "0.9.0", "1.0.0", "", "junk")] == \
+        ["backslash", "backslash", "bracket-class", "bracket-class", "backslash", "backslash"]
+    assert g("IMG [1].jpg", "bracket-class") == "IMG [[]1[]].jpg"
+    assert g("a{b}*?(c)!.txt", "bracket-class") == "a{b}*?(c)!.txt"  # untouched on 0.9.x
+    assert g("a{b}.txt", "backslash") == "a\\{b\\}.txt"
+
+
+def test_new_cli_gets_bracket_class_escaping_from_its_version(env, monkeypatch):
+    db, cli, runner, src, log = env
+    monkeypatch.setenv("FAKE_VERSION", "0.9.0")
+    monkeypatch.setenv("FAKE_REJECT_BACKSLASH", "1")
+    (src / "IMG [1].txt").write_text("x")
+    (src / "br{ace}.txt").write_text("x")
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *", ["skip/**", "a/**"])
+    assert runner.run_job(jid) == "ok"
+    sent = [a for u in uploads(log) for a in u]
+    assert any(a.endswith("IMG [[]1[]].txt") for a in sent) and any(a.endswith("br{ace}.txt") for a in sent)
+    assert not any("\\" in a for a in sent)
+
+
+def test_unknown_version_falls_back_to_the_other_style_and_remembers(env, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.WARNING)
+    db, cli, runner, src, log = env
+    monkeypatch.setenv("FAKE_REJECT_BACKSLASH", "1")  # no FAKE_VERSION: the version is unknown -> backslash first
+    (src / "br{ace}.txt").write_text("x")
+    jid = db.add_job("t", str(src), "/my-files/B", "0 4 * * *", ["skip/**", "a/**"])
+    assert runner.run_job(jid) == "ok"
+    assert "cli_glob_fallback" in caplog.text and cli.glob_mode == "bracket-class"
+    before = len(uploads(log))
+    (src / "second{x}.txt").write_text("y")
+    assert runner.run_job(jid) == "ok"
+    assert len(uploads(log)) == before + 1  # remembered: no failed attempt first this time

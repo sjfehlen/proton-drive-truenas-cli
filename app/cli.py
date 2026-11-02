@@ -90,17 +90,32 @@ def proc_activity(pid: int) -> int:
 
 
 _GLOB_CHARS = re.compile(r"([*?\[\]{}])")
+GLOB_MODES = ("backslash", "bracket-class")
 
 
-def glob_escape(path: str) -> str:
-    """Backslash-escape the characters the CLI treats as glob syntax in local path arguments.
+def glob_escape(path: str, mode: str = "backslash") -> str:
+    """Protect characters the CLI would treat as glob syntax in local path arguments.
 
-    Verified on CLI 0.6.0: it expands local paths as globs, so a file such as `AlbumArt_{GUID}.jpg` or
-    `IMG [1].jpg` fails with "No paths matched" when passed raw. Only these six characters need a
-    backslash. Escaping others breaks the match: `\\(`, `\\!` and `\\\\` are taken literally, so
-    names with parentheses, `!` or a backslash must be passed as they are.
+    The CLI expands local paths as globs and its rules changed between versions (verified):
+
+    * `backslash` (0.6.x): backslash-escape `* ? [ ] { }`. Escaping `( ) ! \\` breaks those names.
+    * `bracket-class` (0.9.x): only `[` and `]` need protecting, written as `[[]` and `[]]`. Backslashes
+      now BREAK the match, and `{ } * ? ( )` work as they are.
+
+    A name that needs no protection is returned unchanged in both modes.
     """
+    if mode == "bracket-class":
+        return re.sub(r"[\[\]]", lambda m: "[[]" if m.group() == "[" else "[]]", path)
     return _GLOB_CHARS.sub(r"\\\1", path)
+
+
+def mode_for_version(version: str | None) -> str:
+    """Escaping style for a CLI version string like '0.9.0'; unknown versions start with `backslash`."""
+    try:
+        major, minor = (int(x) for x in (version or "").split(".")[:2])
+    except ValueError:
+        return "backslash"
+    return "bracket-class" if (major, minor) >= (0, 9) else "backslash"
 
 
 def one_line(text: str, limit: int) -> str:
@@ -140,6 +155,8 @@ class ProtonCli:
         self._upload_slots = ResizableSlots(
             max(1, min(MAX_UPLOAD_WORKERS, int(os.environ.get("UPLOAD_WORKERS", "2")))))
         self._meta_lock = threading.Lock()
+        self._glob_mode: str | None = os.environ.get("GLOB_MODE") or None  # forced, else chosen from the version
+        self._version: str | None = None
         self._cancel = threading.Event()  # set by "Stop job": running uploads are killed, queued ones skipped
         self._status: tuple[float, CliResult] | None = None
 
@@ -151,6 +168,22 @@ class ProtonCli:
         n = max(1, min(MAX_UPLOAD_WORKERS, int(n)))
         self._upload_slots.set_limit(n)
         return n
+
+    def version(self) -> str | None:
+        """CLI version such as '0.6.0' (cached). Costs one CLI call, which also asks Proton for updates."""
+        if not self._version:
+            r = self._run(["version"], 30, quiet=True)
+            m = re.search(r"cli-drive@(\d+\.\d+\.\d+)", r.out)
+            if not m:
+                return None  # do not cache a failure (e.g. the CLI is still being downloaded)
+            self._version = m.group(1)
+        return self._version
+
+    @property
+    def glob_mode(self) -> str:
+        if self._glob_mode is None:
+            self._glob_mode = mode_for_version(self.version())
+        return self._glob_mode
 
     def cancel_uploads(self) -> None:
         self._cancel.set()
@@ -224,7 +257,8 @@ class ProtonCli:
         if self.busy:
             return self._status[1] if self._status else None
         r = self.session_ok()
-        self._status = (now, r)
+        if r.code != 127:  # a missing CLI may be fixed any moment (download in progress): never cache it
+            self._status = (now, r)
         return r
 
     def invalidate_status(self) -> None:
@@ -254,24 +288,40 @@ class ProtonCli:
         return CliResult(True, 0, "")
 
     def upload(self, local_files: list[str], remote_dir: str, timeout: float) -> CliResult:
-        res = self._upload_with_retries(local_files, remote_dir, timeout, skip_thumbnails=False)
+        mode = self.glob_mode
+        res = self._upload_thumbs(local_files, remote_dir, timeout, mode)
+        needs_escaping = any(glob_escape(f, m) != f for f in local_files for m in GLOB_MODES)
+        if res.ok or "No paths matched" not in res.out or not needs_escaping:
+            return res
+        # The CLI did not accept our escaping style (a version we have not seen). Try the other one and
+        # remember whichever works.
+        for alt in [m for m in GLOB_MODES if m != mode]:
+            log.warning("cli_glob_fallback %r did not match some paths; trying %r escaping", mode, alt)
+            retry = self._upload_thumbs(local_files, remote_dir, timeout, alt)
+            if retry.ok or "No paths matched" not in retry.out:
+                self._glob_mode = alt
+                return retry
+        return res
+
+    def _upload_thumbs(self, local_files: list[str], remote_dir: str, timeout: float, mode: str) -> CliResult:
+        res = self._upload_with_retries(local_files, remote_dir, timeout, skip_thumbnails=False, mode=mode)
         # CLI 0.6.0 refuses an image it cannot thumbnail ("Failed to generate thumbnails (use
         # --skip-thumbnails ...)"). One corrupt or odd image would fail its batch on every run, so
         # retry the batch without thumbnails: the file is still backed up, just without a preview.
         if not res.ok and "Failed to generate thumbnails" in res.out:
             log.warning("cli_thumbnail_fallback retrying batch of %d files without thumbnails", len(local_files))
-            res = self._upload_with_retries(local_files, remote_dir, timeout, skip_thumbnails=True)
+            res = self._upload_with_retries(local_files, remote_dir, timeout, skip_thumbnails=True, mode=mode)
         return res
 
     def _upload_with_retries(self, local_files: list[str], remote_dir: str, timeout: float,
-                             skip_thumbnails: bool) -> CliResult:
+                             skip_thumbnails: bool, mode: str = "backslash") -> CliResult:
         # Strategies are mandatory: without them the CLI prompts and a service hangs.
         args = ["filesystem", "upload",
                 "--file-conflict-strategy", self.file_strategy,
                 "--folder-conflict-strategy", self.folder_strategy]
         if skip_thumbnails:
             args.append("--skip-thumbnails")
-        args += [*[glob_escape(f) for f in local_files], remote_dir]
+        args += [*[glob_escape(f, mode) for f in local_files], remote_dir]
         for attempt in range(1, BUSY_ATTEMPTS + 1):
             res = self._run_watched(args, timeout)
             if res.ok or not is_busy(res.out) or attempt == BUSY_ATTEMPTS:

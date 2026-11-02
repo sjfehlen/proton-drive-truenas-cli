@@ -18,13 +18,14 @@ services:
       BATCH_FILES: "50"
       BATCH_MB: "2000"
       STALL_SECONDS: "600"
+      # The app downloads the Proton CLI into /data/bin on first start (SHA-512 checked).
+      # PROTON_CLI_VERSION: "0.6.0"   # default; the version this app was tested with. "latest" follows Proton.
+      # PROTON_CLI_AUTO_DOWNLOAD: "0" # turn off; then mount a binary and set PROTON_CLI_BIN
       STALE_DAYS: "3"
       # STALE_PING_URL: optional Uptime Kuma push URL, pinged "down" if no job succeeds in STALE_DAYS
     volumes:
       # State DB and the Proton session file (a credential): host-path dataset, owned by 568, mode 700.
       - /mnt/Storage/Application/Arcane/proton-backup/data:/data
-      # Proton's CLI binary, downloaded from Proton and made executable. Not part of the image.
-      - /mnt/Storage/Application/Arcane/proton-backup/bin/proton-drive:/opt/proton/proton-drive:ro
       # Backup sources, read-only. Add one line per job source.
       - /mnt/Storage/Application/Immich:/sources/immich:ro
       - /mnt/Storage/GeneralFiles:/sources/generalfiles:ro
